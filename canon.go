@@ -229,6 +229,25 @@ func HashBytes(h crypto.Hash, data []byte) []byte {
 
 func bytesEqual(a, b []byte) bool { return bytes.Equal(a, b) }
 
-func parseUint(s string) (int, error) { return strconv.Atoi(strings.TrimSpace(s)) }
+// parseUint parses a DKIM tag value that RFC 6376 defines as digits only (e.g.
+// the l= body-length tag, sig-l-tag = ... 1*76DIGIT — §3.5). It rejects any
+// value that is not composed solely of ASCII digits, including a leading "+" or
+// "-" sign. This matters: strconv.Atoi accepts a sign, so without this guard a
+// negative l= would parse cleanly and then slice the body with a negative bound
+// (canonBody[:-1]), panicking — a remotely triggerable crash since the
+// signature header is attacker-controlled. strconv.Atoi still rejects values
+// that overflow int.
+func parseUint(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, strconv.ErrSyntax
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, strconv.ErrSyntax
+		}
+	}
+	return strconv.Atoi(s)
+}
 
 func asDNSError(err error, target **net.DNSError) bool { return errors.As(err, target) }
