@@ -272,6 +272,74 @@ func TestVerify_WrongKeyFails(t *testing.T) {
 	}
 }
 
+// injectTag splices an extra "key=value; " tag into the DKIM-Signature of a raw
+// message, right after the a= tag, without disturbing any other bytes.
+func injectTag(t *testing.T, raw []byte, key, value string) []byte {
+	t.Helper()
+	const anchor = "a=rsa-sha256;"
+	s := string(raw)
+	if !strings.Contains(s, anchor) {
+		t.Fatalf("anchor %q not found in signature", anchor)
+	}
+	return []byte(strings.Replace(s, anchor, anchor+" "+key+"="+value+";", 1))
+}
+
+// TestVerify_NegativeBodyLength pins the RFC 6376 §3.5 l= tag ABNF (1*76DIGIT):
+// a negative body-length count is attacker-controlled and reaches the body-hash
+// step before any crypto, so it must be rejected as a syntactically invalid
+// signature (PERMFAIL) — never allowed to slice the body with a negative bound,
+// which panics ("slice bounds out of range [:-1]") and crashes the verifier.
+func TestVerify_NegativeBodyLength(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Hello DKIM world.\r\n")
+	raw = injectTag(t, raw, "l", "-1")
+
+	results := Verify(context.Background(), raw, testKeyResolver(t, pubPEM, "sel", "example.test"))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPermError {
+		t.Errorf("want permerror on negative l=, got %s (%s)", results[0].Result, results[0].Reason)
+	}
+	if results[0].Reason != "invalid l= tag" {
+		t.Errorf("want reason %q, got %q", "invalid l= tag", results[0].Reason)
+	}
+}
+
+// TestVerify_PlusBodyLength covers the other non-digit sign form the ABNF
+// forbids: a leading "+" must be rejected exactly like a leading "-".
+func TestVerify_PlusBodyLength(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Hello DKIM world.\r\n")
+	raw = injectTag(t, raw, "l", "+5")
+
+	results := Verify(context.Background(), raw, testKeyResolver(t, pubPEM, "sel", "example.test"))
+	if len(results) != 1 || results[0].Result != ResultPermError || results[0].Reason != "invalid l= tag" {
+		t.Fatalf("want permerror invalid l= tag on l=+5, got %+v", results)
+	}
+}
+
+// TestVerify_BodyLengthExceedsBody guards the other slice bound: an l= count far
+// larger than the canonicalized body must not slice past the end (which would
+// also panic). The whole available body is used, so the injected tag simply
+// breaks the signature — the result is a clean failure, not a crash.
+func TestVerify_BodyLengthExceedsBody(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "short body\r\n")
+	raw = injectTag(t, raw, "l", "999999999")
+
+	results := Verify(context.Background(), raw, testKeyResolver(t, pubPEM, "sel", "example.test"))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultFail {
+		t.Errorf("want fail (no panic) on oversized l=, got %s (%s)", results[0].Result, results[0].Reason)
+	}
+}
+
 // publicPEM renders a private key's public half exactly as GenerateKey does
 // (PKIX SubjectPublicKeyInfo), which is what RecordValue consumes.
 func publicPEM(t *testing.T, priv *rsa.PrivateKey) string {
