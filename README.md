@@ -123,8 +123,9 @@ resolver to use system DNS, or inject a `TXTResolver` (its signature matches
 
 The canonicalization and single-signature building blocks are exported —
 `SplitMessage`, `CanonicalizeHeader`, `CanonicalizeBody`, `BuildSignedHeaders`,
-`VerifySignature`, `FetchKey`, `ParseTagList`, `RemoveBValue`, `StripWSP` and
-`HashBytes` — so a layered scheme whose signature is structurally a
+`VerifySignature`, `FetchKey`, `ParseTagList`, `ParseTagListStrict`,
+`RemoveBValue`, `StripWSP` and `HashBytes` — so a layered scheme whose
+signature is structurally a
 DKIM-Signature (such as ARC's ARC-Message-Signature) can reuse the exact same
 canonicalization and crypto path.
 
