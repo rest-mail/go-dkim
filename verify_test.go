@@ -610,6 +610,113 @@ func TestHeaderListCoversFrom(t *testing.T) {
 	}
 }
 
+// ── Duplicate tags invalidate the tag-list (RFC 6376 §3.2) ───────────────
+
+// signWithDuplicateTag signs a message (relaxed/relaxed) whose DKIM-Signature
+// value carries the SAME tag name twice. The signature is computed over the
+// exact bytes — duplicate included — so with a last-wins parser every check
+// passes and the crypto verifies: the message returns pass even though RFC 6376
+// §3.2 says a tag-list with a repeated tag name is entirely invalid ("if a tag
+// name does occur more than once, the entire tag-list is invalid"). It is the
+// red-green fixture for issue #7. dupPrefix is spliced in ahead of the genuine
+// tags (e.g. "s=bogus; ") so a first-wins verifier would resolve the tag
+// differently from a last-wins one — the verdict divergence the RFC forbids.
+func signWithDuplicateTag(t *testing.T, priv *rsa.PrivateKey, d, s, dupPrefix string, fields []string, body string) []byte {
+	t.Helper()
+	const hcanon, bcanon = "relaxed", "relaxed"
+
+	bodyHash := sha256.Sum256([]byte(CanonicalizeBody(body, bcanon)))
+	bh := base64.StdEncoding.EncodeToString(bodyHash[:])
+
+	var names []string
+	hdrs := make([]Header, 0, len(fields))
+	for _, f := range fields {
+		eq := strings.IndexByte(f, ':')
+		hdrs = append(hdrs, Header{Name: strings.TrimSpace(f[:eq]), Value: f[eq+1:], Raw: f})
+		names = append(names, strings.ToLower(strings.TrimSpace(f[:eq])))
+	}
+	hlist := strings.Join(names, ":")
+
+	sigVal := " v=1; a=rsa-sha256; c=" + hcanon + "/" + bcanon +
+		"; " + dupPrefix + "d=" + d + "; s=" + s + "; h=" + hlist + "; bh=" + bh + "; b="
+
+	var sb strings.Builder
+	for _, h := range hdrs {
+		sb.WriteString(CanonicalizeHeader(h, hcanon))
+		sb.WriteString("\r\n")
+	}
+	sigHdr := Header{Name: "DKIM-Signature", Value: sigVal, Raw: "DKIM-Signature:" + sigVal}
+	sb.WriteString(CanonicalizeHeader(sigHdr, hcanon))
+
+	hashed := sha256.Sum256([]byte(sb.String()))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, hashed[:])
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(sig)
+
+	var msg strings.Builder
+	msg.WriteString("DKIM-Signature:" + sigVal + b64 + "\r\n")
+	for _, f := range fields {
+		msg.WriteString(f + "\r\n")
+	}
+	msg.WriteString("\r\n")
+	msg.WriteString(body)
+	return []byte(msg.String())
+}
+
+// TestVerify_DuplicateTagRejected is the red-green anchor for issue #7: the
+// signature is cryptographically valid but its tag-list repeats s= (s=bogus …
+// s=sel). Before the fix the parser silently keeps the last value, every check
+// passes and the verifier returns pass — while a first-wins verifier would look
+// up s=bogus and disagree, the cross-implementation divergence RFC 6376 §3.2
+// forbids. The fix rejects the duplicate at parse time and returns PERMFAIL.
+func TestVerify_DuplicateTagRejected(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signWithDuplicateTag(t, priv, "example.test", "sel", "s=bogus; ", fields(), "Body.\r\n")
+
+	results := Verify(context.Background(), raw, testKeyResolver(t, pubPEM, "sel", "example.test"))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPermError {
+		t.Errorf("want permerror on duplicate tag, got %s (%s)", results[0].Result, results[0].Reason)
+	}
+	if !strings.Contains(results[0].Reason, "duplicate") {
+		t.Errorf("want a duplicate-tag reason, got %q", results[0].Reason)
+	}
+}
+
+// TestVerify_DuplicateTagInKeyRecordRejected covers the second parse path named
+// in issue #7: the DNS key record repeats p= (a bogus value first, the genuine
+// key second). A last-wins parser keeps the valid key and the message verifies;
+// RFC 6376 §3.2 makes the whole record invalid, so the key must be rejected and
+// the result is PERMFAIL (no usable key).
+func TestVerify_DuplicateTagInKeyRecordRejected(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
+
+	valid, err := RecordValue(pubPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validP := strings.TrimPrefix(valid, "v=DKIM1; k=rsa; ") // "p=<base64 DER>"
+	rec := "v=DKIM1; k=rsa; p=BOGUS; " + validP             // two p= tags
+	resolver := func(_ context.Context, _ string) ([]string, error) {
+		return []string{rec}, nil
+	}
+
+	results := Verify(context.Background(), raw, resolver)
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPermError {
+		t.Errorf("want permerror on duplicate-tag key record, got %s (%s)", results[0].Result, results[0].Reason)
+	}
+}
+
 // publicPEM renders a private key's public half exactly as GenerateKey does
 // (PKIX SubjectPublicKeyInfo), which is what RecordValue consumes.
 func publicPEM(t *testing.T, priv *rsa.PrivateKey) string {

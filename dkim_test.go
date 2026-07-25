@@ -9,6 +9,42 @@ import (
 	"testing"
 )
 
+// TestParseTagListStrict pins the RFC 6376 §3.2 strict tag-list parser: a
+// well-formed list parses (with a trailing ";" permitted), while a repeated tag
+// name, a non-empty segment lacking "=", or an empty tag name are all rejected.
+func TestParseTagListStrict(t *testing.T) {
+	// A well-formed list parses; keys and value ends are trimmed.
+	got, err := ParseTagListStrict("v=1; a=rsa-sha256 ; d=example.test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["v"] != "1" || got["a"] != "rsa-sha256" || got["d"] != "example.test" {
+		t.Errorf("parsed map wrong: %#v", got)
+	}
+
+	// A trailing ";" leaves an empty final segment, which the ABNF permits.
+	if _, err := ParseTagListStrict("v=1; a=rsa-sha256;"); err != nil {
+		t.Errorf("trailing ';' should be allowed, got %v", err)
+	}
+
+	// A repeated tag name invalidates the whole list (§3.2).
+	if _, err := ParseTagListStrict("s=bogus; d=example.test; s=sel"); err == nil {
+		t.Error("duplicate tag name must be rejected")
+	} else if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("want a duplicate error, got %v", err)
+	}
+
+	// A non-empty segment lacking '=' is a malformed tag-spec.
+	if _, err := ParseTagListStrict("v=1; garbage; d=example.test"); err == nil {
+		t.Error("segment without '=' must be rejected")
+	}
+
+	// An empty tag name ("=value") is malformed (tag-name = ALPHA *ALNUMPUNC).
+	if _, err := ParseTagListStrict("v=1; =oops"); err == nil {
+		t.Error("empty tag name must be rejected")
+	}
+}
+
 func TestRecordName(t *testing.T) {
 	if got := RecordName("default", "mail3.test"); got != "default._domainkey.mail3.test" {
 		t.Errorf("RecordName = %q", got)
