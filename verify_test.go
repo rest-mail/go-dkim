@@ -826,6 +826,111 @@ func TestKeyRecordAllowsHash(t *testing.T) {
 	}
 }
 
+// ── Key-record version v= (RFC 6376 §3.6.1 / §6.1.2) ────────────────────
+
+// TestVerify_KeyRecordWrongVersionRejected is the red-green anchor for issue
+// #11: the message is signed correctly, but the key record published in DNS
+// advertises v=DKIM2 — an unknown key-record version. RFC 6376 §3.6.1 defines
+// the key record's v= tag (default "DKIM1") and requires that, when present, it
+// equal "DKIM1"; §6.1.2 makes a verifier ignore a record with any other version.
+// Before the fix the v= tag was never read, so a v=DKIM2 record was used exactly
+// as a DKIM1 record and the signature verified — a domain's future/parallel key
+// scheme silently honored under DKIM1 rules. The fix skips the record; with no
+// other usable record the verifier PERMFAILs. (This is the DNS KEY record's v=,
+// distinct from the DKIM-Signature header's v= enforced at §3.5 / issue #14.)
+func TestVerify_KeyRecordWrongVersionRejected(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
+
+	valid, err := RecordValue(pubPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := strings.Replace(valid, "v=DKIM1", "v=DKIM2", 1) // wrong key-record version
+	results := Verify(context.Background(), raw, keyRecordResolver("sel", "example.test", rec))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPermError {
+		t.Errorf("v=DKIM2 key record must PERMFAIL, got %s (%s)", results[0].Result, results[0].Reason)
+	}
+}
+
+// TestVerify_KeyRecordVersionNotFirstRejected covers §3.6.1's ordering rule: a
+// key record's v= tag, when present, MUST be the FIRST tag in the record. Here
+// the value is the correct "DKIM1" but it appears after k=, so the record is
+// malformed and MUST NOT be used. Before the fix v= was never inspected, so this
+// record (a valid DKIM1 key by value) verified; the fix skips it and the
+// verifier PERMFAILs.
+func TestVerify_KeyRecordVersionNotFirstRejected(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
+
+	valid, err := RecordValue(pubPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validP := strings.TrimPrefix(valid, "v=DKIM1; k=rsa; ") // "p=<base64 DER>"
+	rec := "k=rsa; v=DKIM1; " + validP                      // v= present but not first
+	results := Verify(context.Background(), raw, keyRecordResolver("sel", "example.test", rec))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPermError {
+		t.Errorf("key record with a non-first v= must PERMFAIL, got %s (%s)", results[0].Result, results[0].Reason)
+	}
+}
+
+// TestVerify_KeyRecordVersionAcceptedVerifies is the green guard: the v=
+// enforcement must not over-reach. A record that omits v= entirely (default
+// DKIM1, §3.6.1) and one that carries v=DKIM1 as its first tag (case-sensitive,
+// as the RFC requires) both remain usable and the signature verifies.
+func TestVerify_KeyRecordVersionAcceptedVerifies(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
+
+	valid, err := RecordValue(pubPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absentV := strings.TrimPrefix(valid, "v=DKIM1; ") // "k=rsa; p=<base64 DER>"
+
+	for _, c := range []struct{ name, rec string }{
+		{"present-DKIM1-first", valid},
+		{"absent", absentV},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			results := Verify(context.Background(), raw, keyRecordResolver("sel", "example.test", c.rec))
+			if len(results) != 1 || results[0].Result != ResultPass {
+				t.Fatalf("record %q must verify; want pass, got %+v", c.rec, results)
+			}
+		})
+	}
+}
+
+// TestFirstTagName pins the ordering helper directly: it returns the name of the
+// first tag in a DKIM tag-list record, ignoring the ABNF's optional leading
+// folding whitespace and empty leading segments, and "" when there is no tag.
+func TestFirstTagName(t *testing.T) {
+	cases := []struct{ rec, want string }{
+		{"v=DKIM1; k=rsa; p=AAA", "v"},
+		{"k=rsa; v=DKIM1; p=AAA", "k"},
+		{"  v=DKIM1; p=AAA", "v"},
+		{"; v=DKIM1", "v"},
+		{"p=AAA", "p"},
+		{"", ""},
+		{"   ", ""},
+	}
+	for _, c := range cases {
+		if got := firstTagName(c.rec); got != c.want {
+			t.Errorf("firstTagName(%q) = %q, want %q", c.rec, got, c.want)
+		}
+	}
+}
+
 // ── Signature expiration x= / timestamp t= (RFC 6376 §3.5 / §6.1.1) ──────
 
 // signWithTiming signs a message (relaxed/relaxed) exactly like signTestMessage
