@@ -291,4 +291,24 @@ func parseUint(s string) (int, error) {
 	return strconv.Atoi(s)
 }
 
+// parseTimeTag parses a DKIM timestamp tag (t= or x=), whose RFC 6376 §3.5 ABNF
+// is 1*12DIGIT — an unsigned decimal count of seconds since the Unix epoch. It
+// rejects an empty value, any non-digit (including a leading "+" or "-" sign),
+// and a value longer than 12 digits, so a syntactically invalid expiration is a
+// clean error rather than being silently ignored. The result is returned as
+// int64 so the epoch-second comparison against the current time is correct on a
+// 32-bit platform (where int would overflow beyond year 2038).
+func parseTimeTag(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || len(s) > 12 {
+		return 0, strconv.ErrSyntax
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, strconv.ErrSyntax
+		}
+	}
+	return strconv.ParseInt(s, 10, 64)
+}
+
 func asDNSError(err error, target **net.DNSError) bool { return errors.As(err, target) }

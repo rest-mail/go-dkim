@@ -9,7 +9,14 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 )
+
+// timeNow is the clock VerifySignature reads to decide whether a signature's x=
+// expiration has passed. It is a package variable, defaulting to time.Now, so
+// tests can pin "now" to a fixed instant and exercise the expiry boundary
+// deterministically without waiting on or depending on the wall clock.
+var timeNow = time.Now
 
 // Verify performs RFC 6376 DKIM verification against a raw RFC 5322 message.
 //
@@ -130,6 +137,43 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 		idomain, ok := identityDomain(iTag)
 		if !ok || !domainAligned(idomain, tags["d"]) {
 			return permfail(fmt.Sprintf("i= domain %q not aligned with d= domain %q", idomain, tags["d"]))
+		}
+	}
+
+	// Signature timing (RFC 6376 §3.5): t= (signature timestamp) and x=
+	// (signature expiration) are counts of seconds since the Unix epoch. These
+	// checks run before the crypto so an expired or malformed signature is
+	// rejected without spending a DNS key lookup or an RSA verification.
+	//
+	//   - A syntactically invalid t= or x= (non-digit, or over 12 digits) is a
+	//     PERMFAIL rather than being silently accepted.
+	//   - When both are present, x= MUST be greater than t=; a value that is not
+	//     is malformed and PERMFAILs.
+	//   - When now is at or after x=, the signature has expired. §6.1.1 lets a
+	//     verifier treat an expired signature as invalid; we do — an expired
+	//     signature is a replay of a message the signer explicitly time-boxed —
+	//     so it PERMFAILs rather than passing.
+	var (
+		tVal  int64
+		haveT bool
+	)
+	if tTag := tags["t"]; tTag != "" {
+		tv, terr := parseTimeTag(tTag)
+		if terr != nil {
+			return permfail("invalid t= tag")
+		}
+		tVal, haveT = tv, true
+	}
+	if xTag := tags["x"]; xTag != "" {
+		xVal, xerr := parseTimeTag(xTag)
+		if xerr != nil {
+			return permfail("invalid x= tag")
+		}
+		if haveT && xVal <= tVal {
+			return permfail("x= expiration not greater than t= timestamp")
+		}
+		if !timeNow().Before(time.Unix(xVal, 0)) {
+			return permfail(fmt.Sprintf("signature expired (x=%s)", xTag))
 		}
 	}
 
