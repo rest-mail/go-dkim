@@ -101,6 +101,20 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 		}
 	}
 
+	// Identity alignment (RFC 6376 §6.1.1): when an Agent or User Identifier
+	// (i=) is present, its domain MUST be the same as, or a subdomain of, the
+	// signing domain (d=). An unaligned i= lets a signature valid for one domain
+	// assert an identity in an arbitrary domain, misleading any assessor that
+	// reads i= to attribute responsibility — so it is a PERMFAIL (domain
+	// mismatch). When i= is absent its default is "@"+d (§3.5), trivially
+	// aligned, so no check is needed.
+	if iTag := tags["i"]; iTag != "" {
+		idomain, ok := identityDomain(iTag)
+		if !ok || !domainAligned(idomain, tags["d"]) {
+			return permfail(fmt.Sprintf("i= domain %q not aligned with d= domain %q", idomain, tags["d"]))
+		}
+	}
+
 	// Algorithm → hash.
 	var hashType crypto.Hash
 	switch strings.ToLower(tags["a"]) {
@@ -183,6 +197,31 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	res.Result = ResultPass
 	res.Reason = fmt.Sprintf("signature ok (d=%s s=%s)", tags["d"], tags["s"])
 	return res
+}
+
+// identityDomain returns the domain part of a DKIM i= (AUID) tag value: the
+// text after the LAST "@". RFC 6376 §3.5 defines i= as [ Local-part ] "@"
+// domain-name, and the local part may be a quoted string that itself contains
+// "@", so the split is on the last "@". A value with no "@" is malformed and
+// yields ("", false).
+func identityDomain(iTag string) (string, bool) {
+	at := strings.LastIndexByte(iTag, '@')
+	if at < 0 {
+		return "", false
+	}
+	return iTag[at+1:], true
+}
+
+// domainAligned reports whether the i= domain idomain is the same as, or a
+// subdomain of, the signing domain d (RFC 6376 §6.1.1), compared
+// case-insensitively. An empty idomain or d is never aligned.
+func domainAligned(idomain, d string) bool {
+	idomain = strings.ToLower(strings.TrimSpace(idomain))
+	d = strings.ToLower(strings.TrimSpace(d))
+	if idomain == "" || d == "" {
+		return false
+	}
+	return idomain == d || strings.HasSuffix(idomain, "."+d)
 }
 
 // FetchKey resolves and parses a signer's RSA public key from its DKIM key
