@@ -717,6 +717,196 @@ func TestVerify_DuplicateTagInKeyRecordRejected(t *testing.T) {
 	}
 }
 
+// ── Signature expiration x= / timestamp t= (RFC 6376 §3.5 / §6.1.1) ──────
+
+// signWithTiming signs a message (relaxed/relaxed) exactly like signTestMessage
+// but splices timing tags (timing, e.g. "t=1000000000; x=1000000001; ") into
+// the signed tag-list just before h=. Because the tags are part of the signed
+// data the crypto verifies, so any rejection comes from the timing semantics
+// themselves — not a broken signature. It is the fixture for the expiration
+// tests: without an x= check an expired signature (x= in the past) still
+// verifies as pass.
+func signWithTiming(t *testing.T, priv *rsa.PrivateKey, d, s, timing string, fields []string, body string) []byte {
+	t.Helper()
+	const hcanon, bcanon = "relaxed", "relaxed"
+
+	bodyHash := sha256.Sum256([]byte(CanonicalizeBody(body, bcanon)))
+	bh := base64.StdEncoding.EncodeToString(bodyHash[:])
+
+	var names []string
+	hdrs := make([]Header, 0, len(fields))
+	for _, f := range fields {
+		eq := strings.IndexByte(f, ':')
+		hdrs = append(hdrs, Header{Name: strings.TrimSpace(f[:eq]), Value: f[eq+1:], Raw: f})
+		names = append(names, strings.ToLower(strings.TrimSpace(f[:eq])))
+	}
+	hlist := strings.Join(names, ":")
+
+	sigVal := " v=1; a=rsa-sha256; c=" + hcanon + "/" + bcanon +
+		"; d=" + d + "; s=" + s + "; " + timing + "h=" + hlist + "; bh=" + bh + "; b="
+
+	var sb strings.Builder
+	for _, h := range hdrs {
+		sb.WriteString(CanonicalizeHeader(h, hcanon))
+		sb.WriteString("\r\n")
+	}
+	sigHdr := Header{Name: "DKIM-Signature", Value: sigVal, Raw: "DKIM-Signature:" + sigVal}
+	sb.WriteString(CanonicalizeHeader(sigHdr, hcanon))
+
+	hashed := sha256.Sum256([]byte(sb.String()))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, hashed[:])
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(sig)
+
+	var msg strings.Builder
+	msg.WriteString("DKIM-Signature:" + sigVal + b64 + "\r\n")
+	for _, f := range fields {
+		msg.WriteString(f + "\r\n")
+	}
+	msg.WriteString("\r\n")
+	msg.WriteString(body)
+	return []byte(msg.String())
+}
+
+// TestVerify_ExpiredSignatureRejected is the red-green anchor for issue #9: the
+// message is signed correctly but carries t=1000000000; x=1000000001 — an
+// expiration in 2001. Before the fix the verifier never reads x=, so the crypto
+// passes and it returns pass, letting an old captured message be replayed
+// indefinitely despite the signer's explicit expiry. RFC 6376 §6.1.1 lets a
+// verifier treat an expired signature as invalid; the fix PERMFAILs it.
+func TestVerify_ExpiredSignatureRejected(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signWithTiming(t, priv, "example.test", "sel", "t=1000000000; x=1000000001; ", fields(), "Body.\r\n")
+
+	results := Verify(context.Background(), raw, testKeyResolver(t, pubPEM, "sel", "example.test"))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPermError {
+		t.Errorf("want permerror on expired x=, got %s (%s)", results[0].Result, results[0].Reason)
+	}
+	if !strings.Contains(results[0].Reason, "expired") {
+		t.Errorf("want an expired reason, got %q", results[0].Reason)
+	}
+}
+
+// withFixedNow pins the package clock to a fixed instant for the duration of a
+// test (restored on cleanup), so the x= expiry boundary is exercised
+// deterministically rather than against the wall clock.
+func withFixedNow(t *testing.T, now time.Time) {
+	t.Helper()
+	prev := timeNow
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = prev })
+}
+
+// TestVerify_NonExpiredSignatureVerifies keeps the legitimate case passing: a
+// signature whose x= lies in the future (relative to the injected clock) must
+// still verify. It pins that the §6.1.1 expiry check rejects only expired
+// signatures and leaves a live one untouched.
+func TestVerify_NonExpiredSignatureVerifies(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	// now = 2001-09-09T01:46:40Z (Unix 1000000000); x= one hour later.
+	withFixedNow(t, time.Unix(1000000000, 0))
+	raw := signWithTiming(t, priv, "example.test", "sel", "t=999999999; x=1000003600; ", fields(), "Body.\r\n")
+
+	results := Verify(context.Background(), raw, testKeyResolver(t, pubPEM, "sel", "example.test"))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPass {
+		t.Errorf("want pass on non-expired x=, got %s (%s)", results[0].Result, results[0].Reason)
+	}
+}
+
+// TestVerify_ExpirationBoundary pins the RFC 6376 §6.1.1 boundary: a signature
+// is expired when now is AT OR AFTER x=, and live strictly before it.
+func TestVerify_ExpirationBoundary(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	resolver := testKeyResolver(t, pubPEM, "sel", "example.test")
+	raw := signWithTiming(t, priv, "example.test", "sel", "x=1000000000; ", fields(), "Body.\r\n")
+
+	t.Run("now==x is expired", func(t *testing.T) {
+		withFixedNow(t, time.Unix(1000000000, 0))
+		if r := Verify(context.Background(), raw, resolver); len(r) != 1 || r[0].Result != ResultPermError {
+			t.Fatalf("now==x should PERMFAIL (expired), got %+v", r)
+		}
+	})
+	t.Run("now<x is live", func(t *testing.T) {
+		withFixedNow(t, time.Unix(999999999, 0))
+		if r := Verify(context.Background(), raw, resolver); len(r) != 1 || r[0].Result != ResultPass {
+			t.Fatalf("now<x should pass, got %+v", r)
+		}
+	})
+}
+
+// TestVerify_ExpirationNotAfterTimestampRejected pins RFC 6376 §3.5: when both
+// t= and x= are present, x= MUST be greater than t=. An x= <= t= is malformed
+// and PERMFAILs regardless of the current time — the check runs ahead of the
+// expiry comparison, so x==t is rejected as malformed, not merely "expired".
+func TestVerify_ExpirationNotAfterTimestampRejected(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	resolver := testKeyResolver(t, pubPEM, "sel", "example.test")
+	// now well before x=, so an accidental expiry path cannot mask the x<=t reject.
+	withFixedNow(t, time.Unix(1000000000, 0))
+
+	for _, timing := range []string{
+		"t=2000000000; x=2000000000; ", // x == t
+		"t=2000000001; x=2000000000; ", // x < t
+	} {
+		t.Run(timing, func(t *testing.T) {
+			raw := signWithTiming(t, priv, "example.test", "sel", timing, fields(), "Body.\r\n")
+			if r := Verify(context.Background(), raw, resolver); len(r) != 1 || r[0].Result != ResultPermError {
+				t.Fatalf("want permerror on x<=t, got %+v", r)
+			}
+		})
+	}
+}
+
+// TestVerify_InvalidExpirationTagRejected pins the RFC 6376 §3.5 x= ABNF
+// (1*12DIGIT): a non-numeric or over-long x= is syntactically invalid and
+// PERMFAILs rather than being silently ignored.
+func TestVerify_InvalidExpirationTagRejected(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	resolver := testKeyResolver(t, pubPEM, "sel", "example.test")
+
+	for _, bad := range []string{"notanumber", "-1", "+5", "1e6", "9999999999999"} {
+		t.Run(bad, func(t *testing.T) {
+			raw := signWithTiming(t, priv, "example.test", "sel", "x="+bad+"; ", fields(), "Body.\r\n")
+			r := Verify(context.Background(), raw, resolver)
+			if len(r) != 1 || r[0].Result != ResultPermError {
+				t.Fatalf("want permerror on invalid x=%q, got %+v", bad, r)
+			}
+			if !strings.Contains(r[0].Reason, "x=") {
+				t.Errorf("want an x= reason, got %q", r[0].Reason)
+			}
+		})
+	}
+}
+
+// TestParseTimeTag pins the RFC 6376 §3.5 timestamp ABNF (1*12DIGIT) directly:
+// digits only, non-empty, at most 12 digits; anything else is an error.
+func TestParseTimeTag(t *testing.T) {
+	good := map[string]int64{"0": 0, "1000000000": 1000000000, "999999999999": 999999999999}
+	for in, want := range good {
+		if got, err := parseTimeTag(in); err != nil || got != want {
+			t.Errorf("parseTimeTag(%q)=%d,%v want %d,nil", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", " ", "-1", "+1", "1e6", "12.5", "abc", "1000000000000"} {
+		if _, err := parseTimeTag(bad); err == nil {
+			t.Errorf("parseTimeTag(%q) should error", bad)
+		}
+	}
+}
+
 // publicPEM renders a private key's public half exactly as GenerateKey does
 // (PKIX SubjectPublicKeyInfo), which is what RecordValue consumes.
 func publicPEM(t *testing.T, priv *rsa.PrivateKey) string {
