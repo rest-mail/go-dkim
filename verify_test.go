@@ -1215,3 +1215,123 @@ func insertFWS(s string) string {
 	mid := len(s) / 2
 	return s[:mid] + "\r\n " + s[mid:]
 }
+
+// ── Signature v= version tag is REQUIRED and MUST be 1 (RFC 6376 §3.5) — issue #14 ──
+//
+// RFC 6376 §3.5 lists v= as the first, REQUIRED tag of a DKIM-Signature and
+// specifies its value MUST be "1". A signature lacking v= is malformed and must
+// PERMFAIL — it must NOT be accepted merely because a wrong-version guard only
+// fired when v= was present. (This is the signature header's v=, distinct from
+// the key record's v=DKIM1, which is issue #11.)
+
+// signWithVersionTag signs a message (relaxed/relaxed) exactly like
+// signTestMessage but lets the caller control the leading v= tag of the
+// DKIM-Signature. versionTag is spliced verbatim at the front of the tag-list
+// (e.g. "v=1; ", "v=2; ", or "" to omit v= entirely) and is part of the signed
+// data, so the produced signature is cryptographically valid over whatever
+// version tag — or none — the caller chose. This isolates the version-tag
+// semantics from the crypto: any rejection comes from the v= check itself, not a
+// broken signature.
+func signWithVersionTag(t *testing.T, priv *rsa.PrivateKey, d, s, versionTag string, fields []string, body string) []byte {
+	t.Helper()
+	const hcanon, bcanon = "relaxed", "relaxed"
+
+	bodyHash := sha256.Sum256([]byte(CanonicalizeBody(body, bcanon)))
+	bh := base64.StdEncoding.EncodeToString(bodyHash[:])
+
+	var names []string
+	hdrs := make([]Header, 0, len(fields))
+	for _, f := range fields {
+		eq := strings.IndexByte(f, ':')
+		hdrs = append(hdrs, Header{Name: strings.TrimSpace(f[:eq]), Value: f[eq+1:], Raw: f})
+		names = append(names, strings.ToLower(strings.TrimSpace(f[:eq])))
+	}
+	hlist := strings.Join(names, ":")
+
+	sigVal := " " + versionTag + "a=rsa-sha256; c=" + hcanon + "/" + bcanon +
+		"; d=" + d + "; s=" + s + "; h=" + hlist + "; bh=" + bh + "; b="
+
+	var sb strings.Builder
+	for _, h := range hdrs {
+		sb.WriteString(CanonicalizeHeader(h, hcanon))
+		sb.WriteString("\r\n")
+	}
+	sigHdr := Header{Name: "DKIM-Signature", Value: sigVal, Raw: "DKIM-Signature:" + sigVal}
+	sb.WriteString(CanonicalizeHeader(sigHdr, hcanon))
+
+	hashed := sha256.Sum256([]byte(sb.String()))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, hashed[:])
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(sig)
+
+	var msg strings.Builder
+	msg.WriteString("DKIM-Signature:" + sigVal + b64 + "\r\n")
+	for _, f := range fields {
+		msg.WriteString(f + "\r\n")
+	}
+	msg.WriteString("\r\n")
+	msg.WriteString(body)
+	return []byte(msg.String())
+}
+
+// TestVerify_MissingVersionRejected is the red-green anchor for issue #14: the
+// message is signed correctly but its DKIM-Signature carries NO v= tag. Before
+// the fix the version guard only rejected a WRONG version (v= present but != 1)
+// and the required-tag loop never listed v=, so an absent v= slipped through the
+// `!= ""` short-circuit and the signature was accepted (pass) — even though RFC
+// 6376 §3.5 makes v= REQUIRED. The fix treats a missing v= as a malformed
+// signature and PERMFAILs.
+func TestVerify_MissingVersionRejected(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signWithVersionTag(t, priv, "example.test", "sel", "", fields(), "Body.\r\n")
+
+	results := Verify(context.Background(), raw, testKeyResolver(t, pubPEM, "sel", "example.test"))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPermError {
+		t.Errorf("want permerror on missing v=, got %s (%s)", results[0].Result, results[0].Reason)
+	}
+	if !strings.Contains(results[0].Reason, "required tag v") {
+		t.Errorf("want a missing-version reason, got %q", results[0].Reason)
+	}
+}
+
+// TestVerify_WrongVersionRejected pins the other half of RFC 6376 §3.5: v= MUST
+// equal "1". A signature declaring v=2 is an unsupported version and PERMFAILs.
+// This case was already caught by the version guard before issue #14; the test
+// guards that the missing-v fix does not regress it.
+func TestVerify_WrongVersionRejected(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signWithVersionTag(t, priv, "example.test", "sel", "v=2; ", fields(), "Body.\r\n")
+
+	results := Verify(context.Background(), raw, testKeyResolver(t, pubPEM, "sel", "example.test"))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPermError {
+		t.Errorf("want permerror on v=2, got %s (%s)", results[0].Result, results[0].Reason)
+	}
+	if !strings.Contains(results[0].Reason, "version") {
+		t.Errorf("want an unsupported-version reason, got %q", results[0].Reason)
+	}
+}
+
+// TestVerify_VersionOneVerifies keeps the legitimate case passing: a signature
+// with v=1 (through the same helper) must still verify, pinning that the §3.5 v=
+// enforcement rejects only the missing/wrong-version cases and leaves a
+// conformant signature untouched.
+func TestVerify_VersionOneVerifies(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signWithVersionTag(t, priv, "example.test", "sel", "v=1; ", fields(), "Body.\r\n")
+
+	results := Verify(context.Background(), raw, testKeyResolver(t, pubPEM, "sel", "example.test"))
+	if len(results) != 1 || results[0].Result != ResultPass {
+		t.Fatalf("want pass with v=1, got %+v", results)
+	}
+}

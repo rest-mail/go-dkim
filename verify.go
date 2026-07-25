@@ -107,10 +107,16 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	res := VerifyResult{Domain: tags["d"], Selector: tags["s"]}
 	permfail := func(reason string) VerifyResult { res.Result = ResultPermError; res.Reason = reason; return res }
 
+	// Version (RFC 6376 §3.5): v= is REQUIRED and MUST be "1". A signature that is
+	// present-but-wrong (v= != 1) is an unsupported version; a signature that
+	// omits v= entirely is malformed. Both PERMFAIL — an absent v= must NOT slip
+	// through the wrong-version guard's `!= ""` short-circuit and be accepted, so
+	// v= is also carried in the required-tag loop below. (This is the signature
+	// header's v=, distinct from the key record's v=DKIM1.)
 	if tags["v"] != "" && tags["v"] != "1" {
 		return permfail("unsupported DKIM version " + tags["v"])
 	}
-	for _, req := range []string{"a", "b", "bh", "d", "s", "h"} {
+	for _, req := range []string{"v", "a", "b", "bh", "d", "s", "h"} {
 		if tags[req] == "" {
 			return permfail("missing required tag " + req)
 		}
