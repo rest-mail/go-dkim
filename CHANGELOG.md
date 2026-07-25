@@ -4,6 +4,63 @@ All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html); releases are Go
 module tags of the form `vMAJOR.MINOR.PATCH`.
 
+## [Unreleased]
+
+## [0.2.0] - 2026-07-25
+
+### BREAKING CHANGES
+
+- `FetchKey` now returns `(*rsa.PublicKey, KeyFlags, string)` — a new `KeyFlags`
+  value is inserted before the result string — and takes an additional
+  `hashAlg string` parameter (the hash half of the verifying signature's `a=`
+  tag). The added return surfaces the selected key record's policy flags so a
+  caller can enforce them against the signature: `KeyFlags.NoSubdomain` reflects
+  the record's `t=s` no-subdomain flag and `KeyFlags.NotForEmail` reflects a
+  restrictive `s=` service-type tag. The added parameter lets `FetchKey` honor
+  the record's `h=` acceptable-hash-algorithm tag. Any code calling this exported
+  primitive directly — such as a layered scheme (ARC) reusing the key path — must
+  update its call site and result destructuring. `Verify` and `VerifySignature`
+  are unchanged.
+
+### Fixed
+
+- Validate the DKIM key record's `v=` version tag (RFC 6376 §3.6.1): a record
+  must either omit `v=` or set it to `DKIM1` as the very first tag. A record
+  whose `v=` names a different version, or places `v=` anywhere but first, is now
+  rejected as unusable instead of being parsed as a v1 key. (#30)
+
+- Enforce the key record's `s=` service-type tag (RFC 6376 §3.6.1). When `s=` is
+  present and lists neither `email` nor the `*` wildcard, the signer has
+  restricted the key to other services, so it is no longer accepted for an email
+  signature and the signature PERMFAILs. An absent `s=` still defaults to all
+  services. (#29)
+
+- Enforce the key record's `t=s` flag (RFC 6376 §3.6.1), which forbids
+  subdomaining. When the flag is set, a signature whose `i=` (AUID) domain is a
+  subdomain of `d=` rather than exactly `d=` is now a PERMFAIL. `FetchKey`
+  returns the flag to the caller through the new `KeyFlags` type. (#28)
+
+- Require the signature's `v=` version tag (RFC 6376 §3.5): a `DKIM-Signature`
+  that omits `v=`, or carries a value other than `1`, is now a PERMFAIL instead
+  of being verified as though it were a v1 signature. (#27)
+
+- Require the `From` field in the signed header list when signing (RFC 6376
+  §5.4). `Sign` now returns an error rather than producing a signature whose `h=`
+  omits `From`, matching the verify-side requirement added in v0.1.3 and
+  preventing creation of a signature that leaves the author identity outside the
+  hash. (#26)
+
+- Accept RFC-legal unpadded base64 in the `bh=` and `b=` signature tags and the
+  key record's `p=` tag (RFC 6376 §2.10). The trailing `=` padding on these
+  base64 fields is optional, but a correctly encoded unpadded value was
+  previously rejected, failing otherwise-valid signatures. Decoding now tolerates
+  missing padding. (#25)
+
+- Enforce the key record's `h=` acceptable-hash-algorithms tag (RFC 6376 §3.6.1
+  / §6.1.2). A key record whose `h=` is present but does not list the verifying
+  signature's hash algorithm is now skipped, so a key published only for, say,
+  `sha256` cannot be used to verify a `sha1` signature. (#24)
+
 ## v0.1.3
 
 ### Fixed
