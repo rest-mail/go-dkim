@@ -247,7 +247,7 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	}
 
 	// ── Public key via DNS ───────────────────────────────────────────
-	pub, kres := FetchKey(ctx, tags["s"], tags["d"], hashAlg, resolver)
+	pub, flags, kres := FetchKey(ctx, tags["s"], tags["d"], hashAlg, resolver)
 	if kres != "" {
 		res.Result = kres
 		res.Reason = "key lookup: " + res.Reason
@@ -257,6 +257,22 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 			res.Reason = "no valid key at " + RecordName(tags["s"], tags["d"])
 		}
 		return res
+	}
+
+	// Key-record t=s flag (RFC 6376 §3.6.1): the "s" flag forbids subdomaining —
+	// any signature carrying an i= (AUID) tag MUST have the same domain on the
+	// right of the "@" as the value of d=; a subdomain is NOT permitted. The
+	// general d=/i= alignment check above admits a subdomain i=, but when the key
+	// the signer published sets t=s that admission is withdrawn: a subdomain AUID
+	// PERMFAILs. When i= is absent its default is "@"+d (§3.5), whose domain
+	// equals d exactly, so t=s is trivially satisfied and no check is needed.
+	if flags.NoSubdomain {
+		if iTag := tags["i"]; iTag != "" {
+			idomain, _ := identityDomain(iTag)
+			if !strings.EqualFold(strings.TrimSpace(idomain), strings.TrimSpace(tags["d"])) {
+				return permfail(fmt.Sprintf("i= domain %q must equal d= domain %q exactly: key record forbids subdomaining (t=s)", idomain, tags["d"]))
+			}
+		}
 	}
 
 	hashed := HashBytes(hashType, []byte(signedData))
@@ -309,22 +325,52 @@ func domainAligned(idomain, d string) bool {
 	return idomain == d || strings.HasSuffix(idomain, "."+d)
 }
 
+// KeyFlags carries the policy-bearing tags of the DKIM key record the verifier
+// selected — the flags it must apply against the signature after the key itself
+// resolves, as distinct from the record fields (p=, k=, h=) FetchKey consumes to
+// produce the key. It is returned by FetchKey so a caller (VerifySignature, or a
+// layered scheme reusing the same key path) can enforce them.
+type KeyFlags struct {
+	// NoSubdomain reflects the key record's t=s flag (RFC 6376 §3.6.1): when set,
+	// any signature carrying an i= (AUID) tag MUST have its domain equal to d=
+	// exactly — subdomain AUIDs are not permitted. Absent the flag (the default),
+	// a subdomain i= is allowed.
+	NoSubdomain bool
+}
+
+// parseKeyFlags reads a DKIM key record's t= tag — a colon-separated list of
+// flags, RFC 6376 §3.6.1, e.g. "y:s" — into a KeyFlags. Flag names are matched
+// case-insensitively with the folding whitespace the ABNF permits around each
+// ":" ignored; unrecognized flags (e.g. "y", testing mode, which the verifier
+// does not act on here) are ignored per §3.6.1.
+func parseKeyFlags(tTag string) KeyFlags {
+	var f KeyFlags
+	for _, flag := range strings.Split(tTag, ":") {
+		if strings.EqualFold(strings.TrimSpace(flag), "s") {
+			f.NoSubdomain = true
+		}
+	}
+	return f
+}
+
 // FetchKey resolves and parses a signer's RSA public key from its DKIM key
 // record at <selector>._domainkey.<domain>. hashAlg is the hash half of the
 // verifying signature's a= tag ("sha256" / "sha1"); a key record whose h= tag
 // is present but does not list hashAlg is ignored (RFC 6376 §3.6.1 / §6.1.2).
-// On success it returns (key, ""); on failure it returns (nil, result) where
-// result is ResultTempError (transient DNS failure) or ResultPermError (missing,
-// revoked, malformed, or hash-algorithm-disallowed key).
-func FetchKey(ctx context.Context, selector, domain, hashAlg string, resolver TXTResolver) (*rsa.PublicKey, string) {
+// On success it returns (key, flags, "") where flags carries the selected key
+// record's policy tags (the t= flags, §3.6.1) for the caller to enforce against
+// the signature; on failure it returns (nil, KeyFlags{}, result) where result is
+// ResultTempError (transient DNS failure) or ResultPermError (missing, revoked,
+// malformed, or hash-algorithm-disallowed key).
+func FetchKey(ctx context.Context, selector, domain, hashAlg string, resolver TXTResolver) (*rsa.PublicKey, KeyFlags, string) {
 	name := RecordName(selector, domain)
 	records, err := resolver(ctx, name)
 	if err != nil {
 		var dnsErr *net.DNSError
 		if ok := asDNSError(err, &dnsErr); ok && dnsErr.IsNotFound {
-			return nil, ResultPermError
+			return nil, KeyFlags{}, ResultPermError
 		}
-		return nil, ResultTempError
+		return nil, KeyFlags{}, ResultTempError
 	}
 	for _, rec := range records {
 		// A key record whose tag-list repeats a tag name (or carries a malformed
@@ -361,10 +407,10 @@ func FetchKey(ctx context.Context, selector, domain, hashAlg string, resolver TX
 			continue
 		}
 		if rsaKey, ok := pub.(*rsa.PublicKey); ok {
-			return rsaKey, ""
+			return rsaKey, parseKeyFlags(kt["t"]), ""
 		}
 	}
-	return nil, ResultPermError
+	return nil, KeyFlags{}, ResultPermError
 }
 
 // keyRecordAllowsHash reports whether a DKIM key record's h= tag value (hTag) —
