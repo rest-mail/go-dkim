@@ -1,14 +1,14 @@
 # Changelog
 
-All notable changes to this project are documented here. This project follows
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html); releases are Go
-module tags of the form `vMAJOR.MINOR.PATCH`.
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Note: pre-1.0, breaking changes may ship in a minor release.
 
 ## [Unreleased]
 
 ## [0.2.0] - 2026-07-25
 
-### BREAKING CHANGES
+### Breaking
 
 - `FetchKey` now returns `(*rsa.PublicKey, KeyFlags, string)` — a new `KeyFlags`
   value is inserted before the result string — and takes an additional
@@ -61,7 +61,7 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
   signature's hash algorithm is now skipped, so a key published only for, say,
   `sha256` cannot be used to verify a `sha1` signature. (#24)
 
-## v0.1.3
+## [0.1.3] - 2026-07-25
 
 ### Fixed
 
@@ -98,7 +98,7 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
   resolving a malformed list to an arbitrary value. Layered schemes such as ARC
   can reuse it on the verification path. (#21)
 
-## v0.1.2
+## [0.1.2] - 2026-07-25
 
 ### Security
 
@@ -114,7 +114,7 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
   not composed solely of ASCII digits — including a leading `+` or `-` — as a
   PERMFAIL. (#16, #17)
 
-## v0.1.1
+## [0.1.1] - 2026-07-23
 
 ### Changed
 
@@ -123,7 +123,7 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
   identifier stays `package dkim`; only the module path and repository changed.
   (#2)
 
-## v0.1.0
+## [0.1.0] - 2026-07-23
 
 ### Added
 

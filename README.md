@@ -134,6 +134,16 @@ canonicalization and crypto path.
 Full API reference:
 [pkg.go.dev/github.com/rest-mail/go-dkim](https://pkg.go.dev/github.com/rest-mail/go-dkim).
 
+## Changelog
+
+Recent releases — see [CHANGELOG.md](CHANGELOG.md) for the complete history.
+
+- **v0.2.0** (2026-07-25) — breaking: `FetchKey` now returns `KeyFlags` + takes a hash-algorithm arg; RFC 6376 verify/sign compliance (v=/t=/s= enforcement, From-must-be-signed, key version).
+- **v0.1.3** (2026-07-25) — verify-side hardening: `From` required in the signed header list, `i=`/`d=` alignment, duplicate-tag and expiry (`x=`) rejection; exports `ParseTagListStrict`.
+- **v0.1.2** (2026-07-25) — security: fix a remotely triggerable panic (DoS) from a negative `l=` body-length tag.
+- **v0.1.1** (2026-07-23) — rename the module path to `github.com/rest-mail/go-dkim`.
+- **v0.1.0** (2026-07-23) — initial release: RFC 6376 DKIM signing and verification, standard library only.
+
 ## License
 
 [MIT](LICENSE) © 2026 rest-mail
