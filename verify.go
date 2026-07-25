@@ -400,6 +400,19 @@ func FetchKey(ctx context.Context, selector, domain, hashAlg string, resolver TX
 		if err != nil {
 			continue
 		}
+		// RFC 6376 §3.6.1 / §6.1.2: the key record's v= tag is the key-record
+		// version (default "DKIM1"). When present it MUST equal "DKIM1"
+		// (case-sensitive) AND MUST be the first tag in the record; a record
+		// advertising any other version (e.g. v=DKIM2) or one whose v= is present
+		// but not first MUST be treated as though it does not exist — skip it so the
+		// caller PERMFAILs when no other record is usable. This blocks a domain's
+		// future or parallel key scheme from being silently honored under DKIM1
+		// rules. An ABSENT v= is permitted and defaults to DKIM1, so its absence
+		// must NOT reject the record. (This is the DNS KEY record's v=, distinct
+		// from the DKIM-Signature header's v= enforced at §3.5.)
+		if v, ok := kt["v"]; ok && (v != "DKIM1" || firstTagName(rec) != "v") {
+			continue
+		}
 		// RFC 6376 §3.6.1 / §6.1.2: the key record's h= tag, when present, lists
 		// the hash algorithms the domain permits with this key. If the signature's
 		// hash algorithm (hashAlg, the hash half of its a= tag) is not among them,
@@ -439,6 +452,26 @@ func FetchKey(ctx context.Context, selector, domain, hashAlg string, resolver TX
 		}
 	}
 	return nil, KeyFlags{}, ResultPermError
+}
+
+// firstTagName returns the name of the first tag in a DKIM tag-list record (the
+// text before the first "="), ignoring the ABNF's optional leading folding
+// whitespace and any empty leading segments (a stray leading ";" or surrounding
+// FWS). It returns "" for a record with no tag. It is used to enforce RFC 6376
+// §3.6.1's requirement that a key record's v= tag, when present, be the FIRST
+// tag in the record.
+func firstTagName(rec string) string {
+	for _, seg := range strings.Split(rec, ";") {
+		if strings.TrimSpace(seg) == "" {
+			continue
+		}
+		eq := strings.IndexByte(seg, '=')
+		if eq < 0 {
+			return ""
+		}
+		return strings.TrimSpace(seg[:eq])
+	}
+	return ""
 }
 
 // keyRecordAllowsHash reports whether a DKIM key record's h= tag value (hTag) —
