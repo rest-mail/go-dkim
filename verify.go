@@ -83,16 +83,22 @@ type Header struct {
 	Raw string
 }
 
-// VerifySignature verifies a single DKIM-style signature header (sig) against
-// the message it covers: allHeaders is the full ordered header block the
-// signature's h= tag selects from, and body is the CRLF-normalized body (both
-// as returned by SplitMessage). It performs body-hash, header-hash and public
-// key checks and returns a VerifyResult.
+// VerifySignature verifies a single DKIM-Signature header (sig) against the
+// message it covers: allHeaders is the full ordered header block the signature's
+// h= tag selects from, and body is the CRLF-normalized body (both as returned by
+// SplitMessage). It performs body-hash, header-hash and public key checks and
+// returns a VerifyResult.
 //
-// It is the per-signature verification primitive underneath Verify. It is
-// exported so that layered schemes (e.g. ARC) can verify their DKIM-shaped
-// signature — an ARC-Message-Signature is structurally a DKIM-Signature — using
-// exactly the same canonicalization and crypto path.
+// It is the per-signature verification primitive underneath Verify and applies
+// the FULL RFC 6376 DKIM-Signature policy: v= is required and must be 1, From
+// must be signed, an i= (AUID) must be aligned with d=, timing (t=/x=) is
+// enforced, and the key record's t=s / s= policy flags are applied.
+//
+// A layered scheme (e.g. ARC) whose signature is structurally a DKIM-Signature
+// but versionless and governed by its own rules should NOT call this — it would
+// inherit DKIM policy that does not apply. Call VerifySignatureBare instead: the
+// same canonicalization and crypto path with none of the DKIM policy, and apply
+// the scheme's own policy on top.
 func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body string, resolver TXTResolver) VerifyResult {
 	// Parse strictly: a DKIM-Signature whose tag-list repeats a tag name (or
 	// carries a malformed segment) is invalid per RFC 6376 §3.2 and must PERMFAIL
@@ -183,6 +189,103 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 		}
 	}
 
+	// ── Cryptographic mechanism ──────────────────────────────────────
+	// Everything above is DKIM-Signature POLICY (RFC 6376). The actual
+	// verification — select h= headers, canonicalize, hash, RSA-check b= against
+	// the d=/s= key — is the policy-free primitive VerifySignatureBare, shared
+	// here so DKIM and a layered scheme run byte-identical crypto. It also returns
+	// the selected key record's policy flags for the two remaining DKIM checks.
+	result, flags := verifyMechanism(ctx, tags, sig, allHeaders, body, resolver)
+	if result.Result != ResultPass {
+		return result
+	}
+
+	// Key-record s= service type (RFC 6376 §3.6.1): s= is a colon-separated list
+	// of the service types the key may be used for, defaulting to "*" (all). We
+	// are verifying an email signature, so a key whose published list names
+	// neither "email" nor the wildcard "*" MUST NOT be used here — the domain
+	// restricted this key to other services (e.g. s=tlsa), and honoring an email
+	// signature under it would defy that restriction. PERMFAIL. Absent s= (the
+	// default "*") imposes no restriction, so FetchKey leaves the flag unset.
+	if flags.NotForEmail {
+		return permfail("key record service type (s=) does not permit email")
+	}
+
+	// Key-record t=s flag (RFC 6376 §3.6.1): the "s" flag forbids subdomaining —
+	// any signature carrying an i= (AUID) tag MUST have the same domain on the
+	// right of the "@" as the value of d=; a subdomain is NOT permitted. The
+	// general d=/i= alignment check above admits a subdomain i=, but when the key
+	// the signer published sets t=s that admission is withdrawn: a subdomain AUID
+	// PERMFAILs. When i= is absent its default is "@"+d (§3.5), whose domain
+	// equals d exactly, so t=s is trivially satisfied and no check is needed.
+	if flags.NoSubdomain {
+		if iTag := tags["i"]; iTag != "" {
+			idomain, _ := identityDomain(iTag)
+			if !strings.EqualFold(strings.TrimSpace(idomain), strings.TrimSpace(tags["d"])) {
+				return permfail(fmt.Sprintf("i= domain %q must equal d= domain %q exactly: key record forbids subdomaining (t=s)", idomain, tags["d"]))
+			}
+		}
+	}
+
+	return result
+}
+
+// VerifySignatureBare verifies ONLY the cryptographic mechanism of a DKIM-shaped
+// signature and applies NONE of the RFC 6376 DKIM-Signature policy. It selects
+// the h= headers, canonicalizes header and body per c= (honoring l=), hashes per
+// a=, resolves the signer's public key from d=/s= via DNS, and checks the b=
+// signature. It does NOT require a v= version tag, does NOT require From to be
+// signed, does NOT check i= (AUID) alignment to d=, does NOT apply signature
+// timing (t=/x=), and does NOT enforce the key record's t=s / s= policy flags.
+//
+// It exists so a layered scheme can verify a signature that is structurally a
+// DKIM-Signature but governed by its OWN policy, then apply that policy itself.
+// The canonical case is ARC: an ARC-Message-Signature is versionless by design
+// (RFC 8617 §4.1.2) and carries no author-alignment semantics, so verifying it
+// under full DKIM policy is wrong. An ARC verifier calls VerifySignatureBare to
+// check the AMS mechanism and then enforces RFC 8617 itself. Selecting the right
+// key (the key record's own v=DKIM1 / h= constraints) is part of the mechanism
+// and still applies.
+//
+// For standalone DKIM use Verify or VerifySignature — which is exactly this
+// primitive plus the full RFC 6376 policy — NOT this function.
+func VerifySignatureBare(ctx context.Context, sig Header, allHeaders []Header, body string, resolver TXTResolver) VerifyResult {
+	// Parse strictly (RFC 6376 §3.2): a tag-list repeating a tag name is invalid
+	// and must PERMFAIL rather than resolve to an arbitrary value — the same rule
+	// VerifySignature applies, since this is the primitive underneath it.
+	tags, err := ParseTagListStrict(sig.Value)
+	if err != nil {
+		return VerifyResult{Result: ResultPermError, Reason: err.Error()}
+	}
+	res, _ := verifyMechanism(ctx, tags, sig, allHeaders, body, resolver)
+	return res
+}
+
+// verifyMechanism is the shared policy-free core beneath VerifySignatureBare and
+// VerifySignature. Given the already-parsed tags it runs the pure verification
+// mechanism and returns the VerifyResult plus, on a Pass, the selected key
+// record's KeyFlags (the t=s / s= policy tags) so a DKIM caller can enforce them.
+// On any non-Pass outcome the returned KeyFlags is the zero value.
+func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, allHeaders []Header, body string, resolver TXTResolver) (VerifyResult, KeyFlags) {
+	res := VerifyResult{Domain: tags["d"], Selector: tags["s"]}
+	permfail := func(reason string) (VerifyResult, KeyFlags) {
+		res.Result = ResultPermError
+		res.Reason = reason
+		return res, KeyFlags{}
+	}
+
+	// Mechanism-required tags (RFC 6376 §3.5): without a=, b=, bh=, d=, s= and h=
+	// the signature simply cannot be verified — they name the algorithm, the
+	// signature bytes, the body hash, the key location and the covered headers.
+	// v= is deliberately NOT required here: it is a DKIM POLICY tag enforced by
+	// VerifySignature, and a versionless ARC-Message-Signature (RFC 8617 §4.1.2)
+	// must verify through this primitive.
+	for _, req := range []string{"a", "b", "bh", "d", "s", "h"} {
+		if tags[req] == "" {
+			return permfail("missing required tag " + req)
+		}
+	}
+
 	// Algorithm → hash. hashAlg is the hash half of the a= tag ("sha256" /
 	// "sha1"), threaded into key evaluation so the key record's h= tag (the hash
 	// algorithms the domain permits with that key) can be enforced (RFC 6376
@@ -235,7 +338,7 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	if !bytesEqual(computedBH, expectedBH) {
 		res.Result = ResultFail
 		res.Reason = "body hash mismatch"
-		return res
+		return res, KeyFlags{}
 	}
 
 	// ── Header hash / signature ──────────────────────────────────────
@@ -256,46 +359,19 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 		} else {
 			res.Reason = "no valid key at " + RecordName(tags["s"], tags["d"])
 		}
-		return res
-	}
-
-	// Key-record s= service type (RFC 6376 §3.6.1): s= is a colon-separated list
-	// of the service types the key may be used for, defaulting to "*" (all). We
-	// are verifying an email signature, so a key whose published list names
-	// neither "email" nor the wildcard "*" MUST NOT be used here — the domain
-	// restricted this key to other services (e.g. s=tlsa), and honoring an email
-	// signature under it would defy that restriction. PERMFAIL. Absent s= (the
-	// default "*") imposes no restriction, so FetchKey leaves the flag unset.
-	if flags.NotForEmail {
-		return permfail("key record service type (s=) does not permit email")
-	}
-
-	// Key-record t=s flag (RFC 6376 §3.6.1): the "s" flag forbids subdomaining —
-	// any signature carrying an i= (AUID) tag MUST have the same domain on the
-	// right of the "@" as the value of d=; a subdomain is NOT permitted. The
-	// general d=/i= alignment check above admits a subdomain i=, but when the key
-	// the signer published sets t=s that admission is withdrawn: a subdomain AUID
-	// PERMFAILs. When i= is absent its default is "@"+d (§3.5), whose domain
-	// equals d exactly, so t=s is trivially satisfied and no check is needed.
-	if flags.NoSubdomain {
-		if iTag := tags["i"]; iTag != "" {
-			idomain, _ := identityDomain(iTag)
-			if !strings.EqualFold(strings.TrimSpace(idomain), strings.TrimSpace(tags["d"])) {
-				return permfail(fmt.Sprintf("i= domain %q must equal d= domain %q exactly: key record forbids subdomaining (t=s)", idomain, tags["d"]))
-			}
-		}
+		return res, KeyFlags{}
 	}
 
 	hashed := HashBytes(hashType, []byte(signedData))
 	if err := rsa.VerifyPKCS1v15(pub, hashType, hashed, sigBytes); err != nil {
 		res.Result = ResultFail
 		res.Reason = "signature verification failed"
-		return res
+		return res, KeyFlags{}
 	}
 
 	res.Result = ResultPass
 	res.Reason = fmt.Sprintf("signature ok (d=%s s=%s)", tags["d"], tags["s"])
-	return res
+	return res, flags
 }
 
 // headerListCoversFrom reports whether a signature's h= tag (a colon-separated

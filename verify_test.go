@@ -1441,6 +1441,113 @@ func TestVerify_VersionOneVerifies(t *testing.T) {
 	}
 }
 
+// ── Bare (policy-free) verification for ARC (RFC 8617 §4.1.2) — issue #33 ──
+//
+// VerifySignatureBare is the policy-free cryptographic primitive: it selects the
+// h= headers, canonicalizes per c=, hashes per a=/l=, and RSA-verifies b= against
+// the d=/s= key — and NOTHING else. It applies none of the RFC 6376
+// DKIM-Signature POLICY that VerifySignature layers on top (v= required, From
+// signed, i= alignment, timing, key t=s/s= flags). It exists so a layered scheme
+// can verify a signature that is structurally a DKIM-Signature but governed by
+// its own policy: an ARC-Message-Signature is versionless by design (RFC 8617
+// §4.1.2) and carries no author-alignment semantics, so an ARC verifier checks
+// the AMS mechanism here and then enforces RFC 8617 itself.
+//
+// These tests pin the SEAM: the same signature that VerifySignatureBare accepts
+// on mechanism, VerifySignature rejects on the DKIM policy it violates — and that
+// VerifySignature's strictness is unchanged is covered by every other test here.
+
+// splitToSig splits a raw message and returns the DKIM-Signature header together
+// with the full header block and body — the exact inputs the per-signature
+// primitives consume — so a test can drive VerifySignature / VerifySignatureBare
+// directly.
+func splitToSig(t *testing.T, raw []byte) (Header, []Header, string) {
+	t.Helper()
+	headers, body := SplitMessage(raw)
+	for _, h := range headers {
+		if strings.EqualFold(h.Name, "DKIM-Signature") {
+			return h, headers, body
+		}
+	}
+	t.Fatal("no DKIM-Signature header in message")
+	return Header{}, nil, ""
+}
+
+// TestVerifySignatureBare_VersionlessSeam is the core red-green anchor for issue
+// #33: a correctly signed VERSIONLESS signature (the ARC-Message-Signature shape,
+// RFC 8617 §4.1.2 — no v= tag) verifies through the bare mechanism primitive, yet
+// the SAME signature PERMFAILs through VerifySignature because RFC 6376 §3.5 makes
+// v= a required DKIM policy tag. This is the seam that lets ARC reuse go-dkim's
+// crypto path without inheriting its DKIM policy.
+func TestVerifySignatureBare_VersionlessSeam(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signWithVersionTag(t, priv, "example.test", "sel", "", fields(), "Body.\r\n")
+	sig, headers, body := splitToSig(t, raw)
+	resolver := testKeyResolver(t, pubPEM, "sel", "example.test")
+
+	if res := VerifySignatureBare(context.Background(), sig, headers, body, resolver); res.Result != ResultPass {
+		t.Errorf("bare: versionless signature must verify, got %s (%s)", res.Result, res.Reason)
+	}
+	res := VerifySignature(context.Background(), sig, headers, body, resolver)
+	if res.Result != ResultPermError {
+		t.Errorf("VerifySignature: versionless must PERMFAIL (v= required), got %s (%s)", res.Result, res.Reason)
+	}
+	if !strings.Contains(res.Reason, "required tag v") {
+		t.Errorf("VerifySignature: want a missing-version reason, got %q", res.Reason)
+	}
+}
+
+// TestVerifySignatureBare_IgnoresIdentityAlignment pins that i=/d= alignment (RFC
+// 6376 §6.1.1) is DKIM POLICY, not mechanism: a cryptographically valid signature
+// whose i= domain is unaligned with d= verifies through the bare primitive but
+// PERMFAILs through VerifySignature.
+func TestVerifySignatureBare_IgnoresIdentityAlignment(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signWithIdentity(t, priv, "example.test", "sel", "mallory@evil.example", fields(), "Body.\r\n")
+	sig, headers, body := splitToSig(t, raw)
+	resolver := testKeyResolver(t, pubPEM, "sel", "example.test")
+
+	if res := VerifySignatureBare(context.Background(), sig, headers, body, resolver); res.Result != ResultPass {
+		t.Errorf("bare must not enforce i= alignment; want pass, got %s (%s)", res.Result, res.Reason)
+	}
+	if res := VerifySignature(context.Background(), sig, headers, body, resolver); res.Result != ResultPermError {
+		t.Errorf("VerifySignature must enforce i= alignment; want permerror, got %s (%s)", res.Result, res.Reason)
+	}
+}
+
+// TestVerifySignatureBare_IgnoresKeyPolicyFlags pins that the key record's t=s
+// (no-subdomain) and s= (service-type) flags (RFC 6376 §3.6.1) are DKIM POLICY,
+// not mechanism: a valid signature verifies through the bare primitive even when
+// those flags would make VerifySignature PERMFAIL.
+func TestVerifySignatureBare_IgnoresKeyPolicyFlags(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+
+	// t=s no-subdomain flag vs a subdomain i=.
+	raw := signWithIdentity(t, priv, "example.test", "sel", "user@sub.example.test", fields(), "Body.\r\n")
+	sig, headers, body := splitToSig(t, raw)
+	tsResolver := keyRecordResolver("sel", "example.test", keyRecordWithFlags(t, pubPEM, "s"))
+	if res := VerifySignatureBare(context.Background(), sig, headers, body, tsResolver); res.Result != ResultPass {
+		t.Errorf("bare must not enforce key t=s flag; want pass, got %s (%s)", res.Result, res.Reason)
+	}
+	if res := VerifySignature(context.Background(), sig, headers, body, tsResolver); res.Result != ResultPermError {
+		t.Errorf("VerifySignature must enforce key t=s flag; want permerror, got %s (%s)", res.Result, res.Reason)
+	}
+
+	// s= service-type flag that does not permit email.
+	raw2 := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
+	sig2, headers2, body2 := splitToSig(t, raw2)
+	svcResolver := keyRecordResolver("sel", "example.test", keyRecordWithService(t, pubPEM, "tlsa"))
+	if res := VerifySignatureBare(context.Background(), sig2, headers2, body2, svcResolver); res.Result != ResultPass {
+		t.Errorf("bare must not enforce key s= service flag; want pass, got %s (%s)", res.Result, res.Reason)
+	}
+	if res := VerifySignature(context.Background(), sig2, headers2, body2, svcResolver); res.Result != ResultPermError {
+		t.Errorf("VerifySignature must enforce key s= service flag; want permerror, got %s (%s)", res.Result, res.Reason)
+	}
+}
+
 // ── Key-record t=s no-subdomain flag (RFC 6376 §3.6.1) ───────────────────
 
 // keyRecordWithFlags renders a valid DKIM key record for the given public PEM

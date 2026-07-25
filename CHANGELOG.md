@@ -6,6 +6,33 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-25
+
+### Added
+
+- `VerifySignatureBare`, a policy-free sibling of `VerifySignature` that verifies
+  ONLY the cryptographic mechanism of a DKIM-shaped signature — it selects the
+  `h=` headers, canonicalizes per `c=`, hashes per `a=` (honoring `l=`), resolves
+  the `d=`/`s=` DNS key and checks `b=` — and applies NONE of the RFC 6376
+  DKIM-Signature policy: no `v=` version requirement, no From-must-be-signed rule,
+  no `i=` (AUID) alignment to `d=`, no `t=`/`x=` timing, and no enforcement of the
+  key record's `t=s` / `s=` policy flags. A layered scheme whose signature is
+  structurally a DKIM-Signature but governed by its own rules can verify the
+  mechanism through this primitive and then apply that scheme's policy itself.
+  Selecting the correct key (the key record's own `v=DKIM1` / `h=` constraints)
+  remains part of the mechanism. (#33)
+
+### Fixed
+
+- Restore ARC compatibility. An ARC-Message-Signature is versionless by design
+  (RFC 8617 §4.1.2), but since v0.2.0 the now-required signature `v=` tag made
+  `VerifySignature` PERMFAIL every AMS with `missing required tag v`, breaking ARC
+  chain verification for consumers that reused it. Verifying an AMS through the
+  new policy-free `VerifySignatureBare` — then applying RFC 8617 policy in the ARC
+  layer — avoids inheriting DKIM policy that does not apply to ARC. Standalone
+  DKIM verification through `Verify` / `VerifySignature` is unchanged and exactly
+  as strict as before. (#33)
+
 ## [0.2.0] - 2026-07-25
 
 ### BREAKING CHANGES
@@ -61,7 +88,7 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
   signature's hash algorithm is now skipped, so a key published only for, say,
   `sha256` cannot be used to verify a `sha1` signature. (#24)
 
-## v0.1.3
+## [0.1.3] - 2026-07-25
 
 ### Fixed
 
@@ -98,7 +125,7 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
   resolving a malformed list to an arbitrary value. Layered schemes such as ARC
   can reuse it on the verification path. (#21)
 
-## v0.1.2
+## [0.1.2] - 2026-07-25
 
 ### Security
 
@@ -114,7 +141,7 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
   not composed solely of ASCII digits — including a leading `+` or `-` — as a
   PERMFAIL. (#16, #17)
 
-## v0.1.1
+## [0.1.1] - 2026-07-23
 
 ### Changed
 
@@ -123,7 +150,7 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
   identifier stays `package dkim`; only the module path and repository changed.
   (#2)
 
-## v0.1.0
+## [0.1.0] - 2026-07-23
 
 ### Added
 
