@@ -123,16 +123,34 @@ resolver to use system DNS, or inject a `TXTResolver` (its signature matches
 
 The canonicalization and single-signature building blocks are exported —
 `SplitMessage`, `CanonicalizeHeader`, `CanonicalizeBody`, `BuildSignedHeaders`,
-`VerifySignature`, `FetchKey`, `ParseTagList`, `ParseTagListStrict`,
-`RemoveBValue`, `StripWSP` and `HashBytes` — so a layered scheme whose
-signature is structurally a
-DKIM-Signature (such as ARC's ARC-Message-Signature) can reuse the exact same
-canonicalization and crypto path.
+`VerifySignature`, `VerifySignatureBare`, `FetchKey`, `ParseTagList`,
+`ParseTagListStrict`, `RemoveBValue`, `StripWSP` and `HashBytes` — so a layered
+scheme whose signature is structurally a DKIM-Signature (such as ARC's
+ARC-Message-Signature) can reuse the exact same canonicalization and crypto path.
+
+For such a scheme, prefer `VerifySignatureBare`: it runs only the cryptographic
+mechanism (header/body canonicalization, hashing, and the RSA check against the
+`d=`/`s=` DNS key) and applies none of the RFC 6376 DKIM-Signature policy — no
+`v=` requirement, no From-signed rule, no `i=` alignment, no timing, no key-record
+`t=s` / `s=` flags — so a versionless ARC-Message-Signature (RFC 8617 §4.1.2)
+verifies and the scheme applies its own policy on top. `VerifySignature` is that
+same primitive plus the full DKIM policy, for standalone DKIM.
 
 ## Documentation
 
 Full API reference:
 [pkg.go.dev/github.com/rest-mail/go-dkim](https://pkg.go.dev/github.com/rest-mail/go-dkim).
+
+## Changelog
+
+Recent releases (full history and detail in [CHANGELOG.md](CHANGELOG.md)):
+
+- **0.2.1** — add `VerifySignatureBare`, a policy-free verification primitive, restoring ARC compatibility (a versionless ARC-Message-Signature can be verified without inheriting DKIM policy).
+- **0.2.0** — enforce the key record's `v=`, `s=` service-type, `t=s` no-subdomain and `h=` hash-algorithm policy; require the signature `v=` tag; require `From` in `h=` when signing; accept unpadded base64. (`FetchKey` signature changed.)
+- **0.1.3** — reject `From` not signed, unaligned `i=`, duplicate tags, and expired/malformed signature timing; export `ParseTagListStrict`.
+- **0.1.2** — reject a non-digit `l=` body-length tag, fixing a remotely triggerable panic.
+- **0.1.1** — rename the module path to `github.com/rest-mail/go-dkim`.
+- **0.1.0** — initial release: RFC 6376 signing and verification, standard library only.
 
 ## License
 
