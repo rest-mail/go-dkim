@@ -483,6 +483,133 @@ func TestIdentityDomain(t *testing.T) {
 	}
 }
 
+// ── From must be signed (RFC 6376 §5.4 / §6.1.1) ─────────────────────────
+
+// signOmittingFrom signs a message (relaxed/relaxed) whose h= tag deliberately
+// omits the From field even though the message carries a From header. The
+// signature is cryptographically valid over the headers it does name, so before
+// the "From must be signed" check it verifies as pass — leaving the displayed
+// author identity outside the hash so From can be swapped (or the message
+// replayed under a new author) without breaking the signature. It is the
+// red-green fixture for issue #6.
+func signOmittingFrom(t *testing.T, priv *rsa.PrivateKey, d, s, body string) []byte {
+	t.Helper()
+	const hcanon, bcanon = "relaxed", "relaxed"
+
+	// From is present in the message but excluded from the signed field set.
+	fromHdr := "From: Alice <alice@example.test>"
+	signedFields := []string{
+		"To: Bob <bob@rcpt.test>",
+		"Subject: unsigned-from attack",
+		"Date: " + time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC).Format(time.RFC1123Z),
+	}
+
+	bodyHash := sha256.Sum256([]byte(CanonicalizeBody(body, bcanon)))
+	bh := base64.StdEncoding.EncodeToString(bodyHash[:])
+
+	var names []string
+	hdrs := make([]Header, 0, len(signedFields))
+	for _, f := range signedFields {
+		eq := strings.IndexByte(f, ':')
+		hdrs = append(hdrs, Header{Name: strings.TrimSpace(f[:eq]), Value: f[eq+1:], Raw: f})
+		names = append(names, strings.ToLower(strings.TrimSpace(f[:eq])))
+	}
+	hlist := strings.Join(names, ":") // e.g. "to:subject:date" — no from
+
+	sigVal := " v=1; a=rsa-sha256; c=" + hcanon + "/" + bcanon +
+		"; d=" + d + "; s=" + s + "; h=" + hlist + "; bh=" + bh + "; b="
+
+	var sb strings.Builder
+	for _, h := range hdrs {
+		sb.WriteString(CanonicalizeHeader(h, hcanon))
+		sb.WriteString("\r\n")
+	}
+	sigHdr := Header{Name: "DKIM-Signature", Value: sigVal, Raw: "DKIM-Signature:" + sigVal}
+	sb.WriteString(CanonicalizeHeader(sigHdr, hcanon))
+
+	hashed := sha256.Sum256([]byte(sb.String()))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, hashed[:])
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(sig)
+
+	var msg strings.Builder
+	msg.WriteString("DKIM-Signature:" + sigVal + b64 + "\r\n")
+	msg.WriteString(fromHdr + "\r\n") // present in the message, absent from h=
+	for _, f := range signedFields {
+		msg.WriteString(f + "\r\n")
+	}
+	msg.WriteString("\r\n")
+	msg.WriteString(body)
+	return []byte(msg.String())
+}
+
+// TestVerify_FromNotSignedRejected is the red-green anchor for issue #6: the
+// message is signed correctly but its h= tag (to:subject:date) never names the
+// From field. Before the fix the verifier hashes only what h= lists and returns
+// pass, so the unsigned From can be forged under a valid signature. RFC 6376
+// §6.1.1 requires PERMFAIL ("From field not signed") when h= does not cover
+// from.
+func TestVerify_FromNotSignedRejected(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signOmittingFrom(t, priv, "example.test", "sel", "Body.\r\n")
+
+	results := Verify(context.Background(), raw, testKeyResolver(t, pubPEM, "sel", "example.test"))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPermError {
+		t.Errorf("want permerror when h= omits from, got %s (%s)", results[0].Result, results[0].Reason)
+	}
+	if !strings.Contains(results[0].Reason, "From") {
+		t.Errorf("want a From-not-signed reason, got %q", results[0].Reason)
+	}
+}
+
+// TestVerify_FromSignedVerifies keeps the legitimate case passing: a signature
+// whose h= includes From (as fields() does) must still verify. It pins that the
+// §6.1.1 check rejects only the missing-From case and does not disturb a normal
+// signature. (Case-insensitive matching of "from" is pinned directly by
+// TestHeaderListCoversFrom, which avoids mutating the signed h= bytes.)
+func TestVerify_FromSignedVerifies(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubPEM := publicPEM(t, priv)
+	resolver := testKeyResolver(t, pubPEM, "sel", "example.test")
+
+	// Normal signature (fields() lists From first in h=).
+	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
+	if r := Verify(context.Background(), raw, resolver); len(r) != 1 || r[0].Result != ResultPass {
+		t.Fatalf("want pass with From in h=, got %+v", r)
+	}
+}
+
+// TestHeaderListCoversFrom pins the h= coverage predicate directly: from is
+// matched case-insensitively and ignoring surrounding whitespace; a list that
+// never names from (or an empty list) is not covered.
+func TestHeaderListCoversFrom(t *testing.T) {
+	cases := []struct {
+		hTag string
+		want bool
+	}{
+		{"from:to:subject", true},
+		{"to:from:date", true},
+		{"to:subject: From ", true}, // whitespace + uppercase
+		{"to:subject:date", false},
+		{"fromish:to", false}, // substring but not the field
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := headerListCoversFrom(c.hTag); got != c.want {
+			t.Errorf("headerListCoversFrom(%q)=%v want %v", c.hTag, got, c.want)
+		}
+	}
+}
+
 // publicPEM renders a private key's public half exactly as GenerateKey does
 // (PKIX SubjectPublicKeyInfo), which is what RecordValue consumes.
 func publicPEM(t *testing.T, priv *rsa.PrivateKey) string {
