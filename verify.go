@@ -259,6 +259,17 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 		return res
 	}
 
+	// Key-record s= service type (RFC 6376 §3.6.1): s= is a colon-separated list
+	// of the service types the key may be used for, defaulting to "*" (all). We
+	// are verifying an email signature, so a key whose published list names
+	// neither "email" nor the wildcard "*" MUST NOT be used here — the domain
+	// restricted this key to other services (e.g. s=tlsa), and honoring an email
+	// signature under it would defy that restriction. PERMFAIL. Absent s= (the
+	// default "*") imposes no restriction, so FetchKey leaves the flag unset.
+	if flags.NotForEmail {
+		return permfail("key record service type (s=) does not permit email")
+	}
+
 	// Key-record t=s flag (RFC 6376 §3.6.1): the "s" flag forbids subdomaining —
 	// any signature carrying an i= (AUID) tag MUST have the same domain on the
 	// right of the "@" as the value of d=; a subdomain is NOT permitted. The
@@ -336,6 +347,14 @@ type KeyFlags struct {
 	// exactly — subdomain AUIDs are not permitted. Absent the flag (the default),
 	// a subdomain i= is allowed.
 	NoSubdomain bool
+
+	// NotForEmail reflects the key record's s= service-type tag (RFC 6376
+	// §3.6.1): s= is a colon-separated list of the service types the key may be
+	// used for, defaulting to "*" (all). When set — meaning s= was present and
+	// listed neither "email" nor the wildcard "*" — the key MUST NOT be used to
+	// verify an email signature. Absent the tag (default "*"), or a list that
+	// includes "email" or "*", leaves it unset and the key usable for email.
+	NotForEmail bool
 }
 
 // parseKeyFlags reads a DKIM key record's t= tag — a colon-separated list of
@@ -407,7 +426,16 @@ func FetchKey(ctx context.Context, selector, domain, hashAlg string, resolver TX
 			continue
 		}
 		if rsaKey, ok := pub.(*rsa.PublicKey); ok {
-			return rsaKey, parseKeyFlags(kt["t"]), ""
+			flags := parseKeyFlags(kt["t"])
+			// RFC 6376 §3.6.1: the key record's s= tag, when present, lists the
+			// service types this key may be used for (default "*", all services). A
+			// list naming neither "email" nor the wildcard "*" bars the key from
+			// verifying an email signature; record that so VerifySignature PERMFAILs.
+			// Absent s= leaves the default (all services), so the key stays usable.
+			if s, ok := kt["s"]; ok && !keyRecordAllowsService(s) {
+				flags.NotForEmail = true
+			}
+			return rsaKey, flags, ""
 		}
 	}
 	return nil, KeyFlags{}, ResultPermError
@@ -425,6 +453,26 @@ func FetchKey(ctx context.Context, selector, domain, hashAlg string, resolver TX
 func keyRecordAllowsHash(hTag, hashAlg string) bool {
 	for _, alg := range strings.Split(hTag, ":") {
 		if strings.EqualFold(strings.TrimSpace(alg), hashAlg) {
+			return true
+		}
+	}
+	return false
+}
+
+// keyRecordAllowsService reports whether a DKIM key record's s= tag value (sTag)
+// — a colon-separated list of the service types the key may be used for, RFC 6376
+// §3.6.1 — permits the "email" service: the list contains either "email" or the
+// wildcard "*". Names are matched case-insensitively with the folding whitespace
+// §3.6.1 allows around each ":" ignored; any other service type in the list is
+// simply not a match (§3.6.1: unrecognized service types are ignored, not an
+// error), so a list like "email:tlsa" permits email on the strength of its
+// "email" entry. It reports only list membership: whether the s= tag is present
+// at all (absent = default "*", all services) is the caller's decision, so an
+// empty sTag — a list with no members — returns false here.
+func keyRecordAllowsService(sTag string) bool {
+	for _, svc := range strings.Split(sTag, ":") {
+		switch strings.ToLower(strings.TrimSpace(svc)) {
+		case "email", "*":
 			return true
 		}
 	}
