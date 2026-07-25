@@ -717,6 +717,115 @@ func TestVerify_DuplicateTagInKeyRecordRejected(t *testing.T) {
 	}
 }
 
+// ── Key-record h= acceptable hash algorithms (RFC 6376 §3.6.1 / §6.1.2) ──
+
+// keyRecordWithHashTag renders a valid DKIM key record for the given public PEM
+// and appends an h= tag listing algs (e.g. "sha1" or "sha1:sha256"), yielding
+// the TXT value a resolver publishes for a key that restricts which hash
+// algorithms it may be used with.
+func keyRecordWithHashTag(t *testing.T, pubPEM, algs string) string {
+	t.Helper()
+	rec, err := RecordValue(pubPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec + "; h=" + algs
+}
+
+// keyRecordResolver returns a resolver publishing rec at selector/domain and
+// NXDOMAIN elsewhere — the key-record analogue of testKeyResolver, but for a
+// caller-supplied record value.
+func keyRecordResolver(selector, domain, rec string) TXTResolver {
+	want := RecordName(selector, domain)
+	return func(_ context.Context, name string) ([]string, error) {
+		if name == want {
+			return []string{rec}, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
+	}
+}
+
+// TestVerify_KeyHashAlgorithmNotAllowedRejected is the red-green anchor for
+// issue #8: the message is signed correctly with rsa-sha256, but the key record
+// published in DNS carries h=sha1 — declaring sha1 the ONLY hash algorithm the
+// domain permits with this key. RFC 6376 §3.6.1 makes h= the per-key list of
+// acceptable hash algorithms, and §6.1.2 requires the verifier to ignore a key
+// record whose h= does not include the signature's hash algorithm, leading to
+// PERMFAIL. Before the fix the h= tag was never read, so an rsa-sha256
+// signature verified against an h=sha1 key — an algorithm-downgrade acceptance
+// avenue by which a key the domain published for sha1 only accepts a stronger
+// (or any other) algorithm it never authorized. The fix skips the record; with
+// no other usable record the verifier PERMFAILs.
+func TestVerify_KeyHashAlgorithmNotAllowedRejected(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
+
+	rec := keyRecordWithHashTag(t, pubPEM, "sha1") // key permits sha1 only
+	results := Verify(context.Background(), raw, keyRecordResolver("sel", "example.test", rec))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPermError {
+		t.Errorf("rsa-sha256 signature against an h=sha1 key must PERMFAIL, got %s (%s)",
+			results[0].Result, results[0].Reason)
+	}
+}
+
+// TestVerify_KeyHashAlgorithmAllowedVerifies confirms the h= enforcement does
+// not over-reach: when the key record's h= list DOES include the signature's
+// hash algorithm — on its own, within a longer list, in either order, with the
+// folding whitespace §3.6.1 permits around the colon, and alongside an
+// unrecognized algorithm that §3.6.1 says to ignore rather than let veto the
+// match — verification still passes.
+func TestVerify_KeyHashAlgorithmAllowedVerifies(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
+
+	for _, algs := range []string{"sha256", "sha1:sha256", "sha256:sha1", "sha1 : sha256", "sha256:x-future-hash"} {
+		t.Run(algs, func(t *testing.T) {
+			rec := keyRecordWithHashTag(t, pubPEM, algs)
+			results := Verify(context.Background(), raw, keyRecordResolver("sel", "example.test", rec))
+			if len(results) != 1 || results[0].Result != ResultPass {
+				t.Fatalf("h=%q includes sha256; want pass, got %+v", algs, results)
+			}
+		})
+	}
+}
+
+// TestKeyRecordAllowsHash pins the h= list-matching helper directly: the
+// signature's hash name must appear in the key record's colon-separated h= list,
+// matched case-insensitively with surrounding folding whitespace ignored, and an
+// unrecognized entry must neither match nor suppress a later valid one.
+func TestKeyRecordAllowsHash(t *testing.T) {
+	allow := []struct{ hTag, alg string }{
+		{"sha256", "sha256"},
+		{"SHA256", "sha256"},
+		{"sha1:sha256", "sha256"},
+		{"sha256:sha1", "sha1"},
+		{" sha1 : sha256 ", "sha256"},
+		{"x-unknown:sha256", "sha256"},
+	}
+	for _, c := range allow {
+		if !keyRecordAllowsHash(c.hTag, c.alg) {
+			t.Errorf("keyRecordAllowsHash(%q, %q) = false, want true", c.hTag, c.alg)
+		}
+	}
+	deny := []struct{ hTag, alg string }{
+		{"sha1", "sha256"},
+		{"sha256", "sha1"},
+		{"sha1:sha512", "sha256"},
+		{"x-unknown", "sha256"},
+		{"", "sha256"},
+	}
+	for _, c := range deny {
+		if keyRecordAllowsHash(c.hTag, c.alg) {
+			t.Errorf("keyRecordAllowsHash(%q, %q) = true, want false", c.hTag, c.alg)
+		}
+	}
+}
+
 // ── Signature expiration x= / timestamp t= (RFC 6376 §3.5 / §6.1.1) ──────
 
 // signWithTiming signs a message (relaxed/relaxed) exactly like signTestMessage
