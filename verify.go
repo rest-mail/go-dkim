@@ -101,6 +101,16 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 		}
 	}
 
+	// From MUST be signed (RFC 6376 §5.4, §6.1.1): the h= list MUST include the
+	// From header field. If it does not, the displayed author identity sits
+	// outside the signature's hash, so From can be altered — or the message
+	// replayed under a new author — without breaking the signature, defeating
+	// DKIM's core guarantee. Per §6.1.1 the Verifier MUST ignore such a
+	// signature and return PERMFAIL (From field not signed).
+	if !headerListCoversFrom(tags["h"]) {
+		return permfail("From field not signed (h= does not cover from)")
+	}
+
 	// Identity alignment (RFC 6376 §6.1.1): when an Agent or User Identifier
 	// (i=) is present, its domain MUST be the same as, or a subdomain of, the
 	// signing domain (d=). An unaligned i= lets a signature valid for one domain
@@ -197,6 +207,19 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	res.Result = ResultPass
 	res.Reason = fmt.Sprintf("signature ok (d=%s s=%s)", tags["d"], tags["s"])
 	return res
+}
+
+// headerListCoversFrom reports whether a signature's h= tag (a colon-separated
+// list of header field names) includes the From field, matched
+// case-insensitively and ignoring whitespace around each name. RFC 6376 §5.4
+// makes From mandatory in h=; §6.1.1 requires PERMFAIL when it is absent.
+func headerListCoversFrom(hTag string) bool {
+	for _, name := range strings.Split(hTag, ":") {
+		if strings.EqualFold(strings.TrimSpace(name), "from") {
+			return true
+		}
+	}
+	return false
 }
 
 // identityDomain returns the domain part of a DKIM i= (AUID) tag value: the
