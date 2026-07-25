@@ -87,7 +87,15 @@ type Header struct {
 // signature — an ARC-Message-Signature is structurally a DKIM-Signature — using
 // exactly the same canonicalization and crypto path.
 func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body string, resolver TXTResolver) VerifyResult {
-	tags := ParseTagList(sig.Value)
+	// Parse strictly: a DKIM-Signature whose tag-list repeats a tag name (or
+	// carries a malformed segment) is invalid per RFC 6376 §3.2 and must PERMFAIL
+	// rather than resolve to an arbitrary value — otherwise verifiers that pick a
+	// different value for the duplicate reach different verdicts about the same
+	// message.
+	tags, err := ParseTagListStrict(sig.Value)
+	if err != nil {
+		return VerifyResult{Result: ResultPermError, Reason: err.Error()}
+	}
 
 	res := VerifyResult{Domain: tags["d"], Selector: tags["s"]}
 	permfail := func(reason string) VerifyResult { res.Result = ResultPermError; res.Reason = reason; return res }
@@ -262,7 +270,14 @@ func FetchKey(ctx context.Context, selector, domain string, resolver TXTResolver
 		return nil, ResultTempError
 	}
 	for _, rec := range records {
-		kt := ParseTagList(rec)
+		// A key record whose tag-list repeats a tag name (or carries a malformed
+		// segment) is invalid per RFC 6376 §3.2; skip it rather than resolve, say,
+		// a duplicate p= to one of its values. If no valid record remains, the
+		// caller returns PERMFAIL (no usable key).
+		kt, err := ParseTagListStrict(rec)
+		if err != nil {
+			continue
+		}
 		if kt["p"] == "" {
 			continue // revoked or malformed
 		}

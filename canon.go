@@ -6,6 +6,7 @@ import (
 	"crypto/sha1" //nolint:gosec // rsa-sha1 is a legacy DKIM algorithm receivers must still verify
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -171,6 +172,46 @@ func ParseTagList(s string) map[string]string {
 		out[key] = strings.TrimSpace(seg[eq+1:])
 	}
 	return out
+}
+
+// ParseTagListStrict parses a DKIM tag=value list like ParseTagList but enforces
+// the RFC 6376 §3.2 well-formedness rules the verification paths require:
+//
+//   - "Tags with duplicate names MUST NOT occur within a single tag-list; if a
+//     tag name does occur more than once, the entire tag-list is invalid."
+//     Silently taking one of the values (as a last-wins parse does) lets two
+//     verifiers reach different verdicts about the same message, so a repeated
+//     tag name is an error.
+//   - A non-empty segment that lacks "=" is a malformed tag-spec and is an
+//     error (§6.1.1 cautions against being liberal in what is accepted). An
+//     empty segment — e.g. from the optional trailing ";" the ABNF allows, or
+//     surrounding folding whitespace — is ignored, not rejected.
+//   - A segment with an empty tag name ("=value") is malformed
+//     (tag-name = ALPHA *ALNUMPUNC) and is an error.
+//
+// On any violation it returns a nil map and an error, so a caller verifying a
+// DKIM-Signature or a DNS key record can PERMFAIL (or skip the record) rather
+// than resolve a malformed list to an arbitrary value.
+func ParseTagListStrict(s string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, seg := range strings.Split(s, ";") {
+		eq := strings.IndexByte(seg, '=')
+		if eq < 0 {
+			if strings.TrimSpace(seg) == "" {
+				continue // empty segment: trailing ";" or surrounding FWS
+			}
+			return nil, fmt.Errorf("malformed tag-list segment %q (missing '=')", strings.TrimSpace(seg))
+		}
+		key := strings.TrimSpace(seg[:eq])
+		if key == "" {
+			return nil, fmt.Errorf("malformed tag-list segment (empty tag name)")
+		}
+		if _, dup := out[key]; dup {
+			return nil, fmt.Errorf("duplicate tag %q in tag-list", key)
+		}
+		out[key] = strings.TrimSpace(seg[eq+1:])
+	}
+	return out, nil
 }
 
 // RemoveBValue blanks the value of the b= tag in a signature field (a
