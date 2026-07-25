@@ -4,6 +4,43 @@ All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html); releases are Go
 module tags of the form `vMAJOR.MINOR.PATCH`.
 
+## v0.1.3
+
+### Fixed
+
+- Reject a signature whose `h=` signed-header list does not include the `From`
+  field. RFC 6376 §5.4 makes `From` mandatory in `h=` and §6.1.1 requires a
+  PERMFAIL when it is absent; otherwise the displayed author identity sits
+  outside the signed hash and can be altered after signing without breaking the
+  signature. Verification now PERMFAILs when `h=` does not cover `From`. (#20)
+
+- Reject a signature whose `i=` (AUID) identity domain is not the signing
+  domain (`d=`) or a subdomain of it, per RFC 6376 §6.1.1. An unaligned `i=`
+  let a signature that is valid for one domain be presented as authorizing
+  another; the domain mismatch is now a PERMFAIL. When `i=` is absent its
+  default (`@` + `d=`) is trivially aligned. (#19)
+
+- Reject a DKIM-Signature tag-list, or a DNS key record, that contains a
+  duplicate tag name. RFC 6376 §3.2 declares such a list invalid, but the
+  previous last-wins parse silently kept one value, letting two verifiers reach
+  different verdicts about the same message. A repeated tag name is now a
+  PERMFAIL for a signature and causes a malformed key record to be skipped. (#21)
+
+- Reject an expired signature and malformed signature timing. A signature whose
+  `x=` expiration has passed (the current time is at or after `x=`) is treated
+  as invalid per RFC 6376 §6.1.1; an `x=` that is not greater than `t=`, and a
+  `t=` or `x=` that is not a 1–12 digit epoch-second count, are PERMFAILs rather
+  than being silently ignored. Timestamps are compared as 64-bit values so the
+  expiry check stays correct beyond 2038 on 32-bit platforms. (#22)
+
+### Added
+
+- Export `ParseTagListStrict`, a strict sibling of `ParseTagList` that enforces
+  the RFC 6376 §3.2 well-formedness rules — no duplicate tag names, no segment
+  missing `=`, no empty tag name — and returns an error instead of silently
+  resolving a malformed list to an arbitrary value. Layered schemes such as ARC
+  can reuse it on the verification path. (#21)
+
 ## v0.1.2
 
 ### Security
