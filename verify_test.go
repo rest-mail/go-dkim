@@ -1026,3 +1026,192 @@ func publicPEM(t *testing.T, priv *rsa.PrivateKey) string {
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
 }
+
+// ── Unpadded base64 tolerance (RFC 6376 §2.10 / §3.5) — issue #10 ─────────
+//
+// RFC 6376's base64string ABNF makes the trailing "=" padding OPTIONAL, so a
+// conformant signer or key record may emit unpadded base64. verify.go must
+// decode bh=, b= and key p= tolerantly and MUST NOT reject an otherwise-valid
+// signature with a spurious "invalid base64" PERMFAIL merely because the
+// padding is absent.
+
+// signTestMessageUnpadded is signTestMessage (relaxed/relaxed) with the base64
+// padding stripped from the two signature-carried base64 values: bh= (which is
+// part of the signed header bytes, so the signature is computed over the
+// unpadded form) and b= (the signature itself, not self-covered). A SHA-256
+// digest is 32 bytes and a 1024-bit RSA signature is 128 bytes — both ≡ 2
+// (mod 3) — so each canonical encoding carries exactly one "=" that this strips,
+// yielding values whose length is not a multiple of four. The produced
+// signature is cryptographically valid; only its base64 encoding is unpadded.
+func signTestMessageUnpadded(t *testing.T, priv *rsa.PrivateKey, d, s string, fields []string, body string) []byte {
+	t.Helper()
+	const hcanon, bcanon = "relaxed", "relaxed"
+
+	bodyHash := sha256.Sum256([]byte(CanonicalizeBody(body, bcanon)))
+	bh := strings.TrimRight(base64.StdEncoding.EncodeToString(bodyHash[:]), "=")
+
+	var names []string
+	hdrs := make([]Header, 0, len(fields))
+	for _, f := range fields {
+		eq := strings.IndexByte(f, ':')
+		hdrs = append(hdrs, Header{Name: strings.TrimSpace(f[:eq]), Value: f[eq+1:], Raw: f})
+		names = append(names, strings.ToLower(strings.TrimSpace(f[:eq])))
+	}
+	hlist := strings.Join(names, ":")
+
+	sigVal := " v=1; a=rsa-sha256; c=" + hcanon + "/" + bcanon +
+		"; d=" + d + "; s=" + s + "; h=" + hlist + "; bh=" + bh + "; b="
+
+	var sb strings.Builder
+	for _, h := range hdrs {
+		sb.WriteString(CanonicalizeHeader(h, hcanon))
+		sb.WriteString("\r\n")
+	}
+	sigHdr := Header{Name: "DKIM-Signature", Value: sigVal, Raw: "DKIM-Signature:" + sigVal}
+	sb.WriteString(CanonicalizeHeader(sigHdr, hcanon))
+
+	hashed := sha256.Sum256([]byte(sb.String()))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, hashed[:])
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	b64 := strings.TrimRight(base64.StdEncoding.EncodeToString(sig), "=")
+
+	var msg strings.Builder
+	msg.WriteString("DKIM-Signature:" + sigVal + b64 + "\r\n")
+	for _, f := range fields {
+		msg.WriteString(f + "\r\n")
+	}
+	msg.WriteString("\r\n")
+	msg.WriteString(body)
+	return []byte(msg.String())
+}
+
+// unpaddedKeyResolver serves the signer's public key as a normal DKIM TXT record
+// but with the trailing "=" padding stripped from its p= value (p= is the last
+// tag, so trimming the record's trailing "=" trims only the p= padding).
+func unpaddedKeyResolver(t *testing.T, pubPEM, selector, domain string) TXTResolver {
+	t.Helper()
+	txt, err := RecordValue(pubPEM)
+	if err != nil {
+		t.Fatalf("RecordValue: %v", err)
+	}
+	unpadded := strings.TrimRight(txt, "=")
+	if unpadded == txt {
+		t.Fatalf("key p= carried no padding to strip; pick a key size whose DER length is not a multiple of 3")
+	}
+	want := RecordName(selector, domain)
+	return func(_ context.Context, name string) ([]string, error) {
+		if name == want {
+			return []string{unpadded}, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
+	}
+}
+
+// TestVerify_UnpaddedBase64Accepted is the issue #10 regression: a signature or
+// key record whose base64 values omit the optional "=" padding must still
+// verify. On the pre-fix strict-padded decoder each subtest PERMFAILs with a
+// spurious "invalid base64"; padded inputs must keep verifying unchanged.
+func TestVerify_UnpaddedBase64Accepted(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubPEM := publicPEM(t, priv)
+	body := "Hello DKIM world.\r\nSecond line.\r\n"
+
+	t.Run("unpadded bh= and b=", func(t *testing.T) {
+		raw := signTestMessageUnpadded(t, priv, "example.test", "sel", fields(), body)
+		results := Verify(context.Background(), raw, testKeyResolver(t, pubPEM, "sel", "example.test"))
+		if len(results) != 1 {
+			t.Fatalf("want 1 result, got %d", len(results))
+		}
+		if results[0].Result != ResultPass {
+			t.Fatalf("unpadded bh=/b= must verify, got %s (%s)", results[0].Result, results[0].Reason)
+		}
+	})
+
+	t.Run("unpadded key p=", func(t *testing.T) {
+		// 1032-bit key: its SubjectPublicKeyInfo DER length is not a multiple of
+		// 3, so the canonical p= base64 carries padding to strip (a 1024/2048-bit
+		// key's DER length is a multiple of 3 and would need none). The signature
+		// itself stays padded — only the published key record is unpadded.
+		kpriv, kerr := rsa.GenerateKey(rand.Reader, 1032)
+		if kerr != nil {
+			t.Fatal(kerr)
+		}
+		raw := signTestMessage(t, kpriv, "example.test", "sel", "relaxed", "relaxed", fields(), body)
+		results := Verify(context.Background(), raw, unpaddedKeyResolver(t, publicPEM(t, kpriv), "sel", "example.test"))
+		if len(results) != 1 {
+			t.Fatalf("want 1 result, got %d", len(results))
+		}
+		if results[0].Result != ResultPass {
+			t.Fatalf("unpadded key p= must verify, got %s (%s)", results[0].Result, results[0].Reason)
+		}
+	})
+
+	t.Run("padded still verifies (regression)", func(t *testing.T) {
+		raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), body)
+		results := Verify(context.Background(), raw, testKeyResolver(t, pubPEM, "sel", "example.test"))
+		if len(results) != 1 || results[0].Result != ResultPass {
+			t.Fatalf("padded base64 must still verify, got %+v", results)
+		}
+	})
+}
+
+// TestDecodeBase64Tag exercises the tolerant decoder that all three verify.go
+// base64 sites (bh=, b=, key p=) share, over the shapes RFC 6376 §2.10 / §3.5
+// permit: padded and unpadded (length ≡ 2 and ≡ 3 mod 4), values carrying folding
+// whitespace, and genuinely invalid input that must still be rejected.
+func TestDecodeBase64Tag(t *testing.T) {
+	// Inputs chosen so the canonical encoding needs padding: 4 bytes ≡ 1 (mod 3)
+	// → 2 pad chars (encoded length ≡ 3 mod 4); 5 bytes ≡ 2 (mod 3) → 1 pad char
+	// (encoded length ≡ 2 mod 4). 3 bytes needs none (length ≡ 0 mod 4).
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"one pad char (len%4==2)", []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x01}},
+		{"two pad chars (len%4==3)", []byte{0xDE, 0xAD, 0xBE, 0xEF}},
+		{"no pad needed (len%4==0)", []byte{0xDE, 0xAD, 0xBE}},
+		{"empty", []byte{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			padded := base64.StdEncoding.EncodeToString(tc.raw)
+			unpadded := strings.TrimRight(padded, "=")
+
+			for label, in := range map[string]string{
+				"padded":              padded,
+				"unpadded":            unpadded,
+				"unpadded + FWS fold": insertFWS(unpadded),
+				"padded + FWS fold":   insertFWS(padded),
+			} {
+				got, err := decodeBase64Tag(in)
+				if err != nil {
+					t.Fatalf("%s: unexpected error: %v", label, err)
+				}
+				if !bytesEqual(got, tc.raw) {
+					t.Fatalf("%s: decoded %x, want %x", label, got, tc.raw)
+				}
+			}
+		})
+	}
+
+	// Genuinely invalid base64 must still be rejected (not silently accepted).
+	for _, bad := range []string{"!!!!", "AB=C", "ABCDE"} { // last is length ≡ 1 mod 4
+		if _, err := decodeBase64Tag(bad); err == nil {
+			t.Errorf("decodeBase64Tag(%q) accepted invalid input, want error", bad)
+		}
+	}
+}
+
+// insertFWS splices a CRLF+space fold into the middle of a base64 string to model
+// a value folded across lines (RFC 6376 permits FWS within base64string).
+func insertFWS(s string) string {
+	if len(s) < 2 {
+		return s
+	}
+	mid := len(s) / 2
+	return s[:mid] + "\r\n " + s[mid:]
+}
