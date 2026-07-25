@@ -1335,3 +1335,123 @@ func TestVerify_VersionOneVerifies(t *testing.T) {
 		t.Fatalf("want pass with v=1, got %+v", results)
 	}
 }
+
+// ── Key-record t=s no-subdomain flag (RFC 6376 §3.6.1) ───────────────────
+
+// keyRecordWithFlags renders a valid DKIM key record for the given public PEM
+// and appends a t= tag carrying flags (e.g. "s" or "y:s"), yielding the TXT
+// value a resolver publishes for a key whose policy flags the verifier must
+// apply against the signature.
+func keyRecordWithFlags(t *testing.T, pubPEM, flags string) string {
+	t.Helper()
+	rec, err := RecordValue(pubPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec + "; t=" + flags
+}
+
+// TestVerify_KeyTSFlagRejectsSubdomainIdentity is the red-green anchor for issue
+// #13: the message is signed correctly for d=example.test and carries an AUID in
+// a subdomain (i=user@sub.example.test) — which the general d=/i= alignment
+// check admits — but the key record published in DNS sets t=s. RFC 6376 §3.6.1
+// makes the "s" flag forbid subdomaining: any signature's i= domain MUST equal
+// d= exactly. Before the fix the t= flag was never read, so the subdomain AUID
+// verified in defiance of the key's published policy. The fix PERMFAILs.
+func TestVerify_KeyTSFlagRejectsSubdomainIdentity(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signWithIdentity(t, priv, "example.test", "sel", "user@sub.example.test", fields(), "Body.\r\n")
+
+	rec := keyRecordWithFlags(t, pubPEM, "s") // key forbids subdomaining
+	results := Verify(context.Background(), raw, keyRecordResolver("sel", "example.test", rec))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPermError {
+		t.Errorf("subdomain i= against a t=s key must PERMFAIL, got %s (%s)",
+			results[0].Result, results[0].Reason)
+	}
+	if !strings.Contains(results[0].Reason, "t=s") {
+		t.Errorf("want a t=s no-subdomain reason, got %q", results[0].Reason)
+	}
+}
+
+// TestVerify_KeyTSFlagAllowsExactIdentity guards the boundary: t=s must not
+// over-reach. When the key sets t=s (in a list "y:s", to also exercise flag-list
+// parsing) but the signature's i= domain equals d= exactly — or i= is absent, so
+// its §3.5 default "@"+d equals d — verification still passes.
+func TestVerify_KeyTSFlagAllowsExactIdentity(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	rec := keyRecordWithFlags(t, pubPEM, "y:s")
+	resolver := keyRecordResolver("sel", "example.test", rec)
+
+	for _, iTag := range []string{
+		"user@example.test", // exactly d=
+		"user@EXAMPLE.TEST", // case-insensitive match of d=
+		"@example.test",     // empty local part, domain == d=
+	} {
+		t.Run(iTag, func(t *testing.T) {
+			raw := signWithIdentity(t, priv, "example.test", "sel", iTag, fields(), "Body.\r\n")
+			results := Verify(context.Background(), raw, resolver)
+			if len(results) != 1 || results[0].Result != ResultPass {
+				t.Fatalf("i=%s with t=s key should pass, got %+v", iTag, results)
+			}
+		})
+	}
+
+	// i= absent: default AUID is "@"+d, exactly aligned, so t=s is satisfied.
+	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
+	if r := Verify(context.Background(), raw, resolver); len(r) != 1 || r[0].Result != ResultPass {
+		t.Fatalf("absent i= with t=s key should pass, got %+v", r)
+	}
+}
+
+// TestVerify_NoTSFlagAllowsSubdomainIdentity guards the default: absent the t=s
+// flag, a subdomain AUID (i=user@sub.example.test) remains permitted per RFC
+// 6376 §3.6.1 — the fix must not narrow the default subdomain-allowed behavior.
+func TestVerify_NoTSFlagAllowsSubdomainIdentity(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signWithIdentity(t, priv, "example.test", "sel", "user@sub.example.test", fields(), "Body.\r\n")
+
+	// Plain key record (no t=), and one whose t= lists only unrelated flags.
+	for _, rec := range []string{
+		mustRecord(t, pubPEM),
+		keyRecordWithFlags(t, pubPEM, "y"), // testing flag, not s
+	} {
+		results := Verify(context.Background(), raw, keyRecordResolver("sel", "example.test", rec))
+		if len(results) != 1 || results[0].Result != ResultPass {
+			t.Fatalf("subdomain i= without t=s should pass, got %+v", results)
+		}
+	}
+}
+
+func mustRecord(t *testing.T, pubPEM string) string {
+	t.Helper()
+	rec, err := RecordValue(pubPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec
+}
+
+// TestParseKeyFlags pins the flag-list parser directly: the "s" (no-subdomain)
+// flag is recognized alone, within a colon-separated list, in either case, with
+// surrounding folding whitespace ignored; unrecognized flags (e.g. "y") neither
+// set it nor suppress a sibling "s".
+func TestParseKeyFlags(t *testing.T) {
+	set := []string{"s", "S", "y:s", "s:y", " y : s ", "s:x-future"}
+	for _, tt := range set {
+		if !parseKeyFlags(tt).NoSubdomain {
+			t.Errorf("parseKeyFlags(%q).NoSubdomain = false, want true", tt)
+		}
+	}
+	unset := []string{"", "y", "y:x-future", "subdomain"}
+	for _, tt := range unset {
+		if parseKeyFlags(tt).NoSubdomain {
+			t.Errorf("parseKeyFlags(%q).NoSubdomain = true, want false", tt)
+		}
+	}
+}
