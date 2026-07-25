@@ -177,13 +177,17 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 		}
 	}
 
-	// Algorithm → hash.
+	// Algorithm → hash. hashAlg is the hash half of the a= tag ("sha256" /
+	// "sha1"), threaded into key evaluation so the key record's h= tag (the hash
+	// algorithms the domain permits with that key) can be enforced (RFC 6376
+	// §3.6.1 / §6.1.2).
 	var hashType crypto.Hash
+	var hashAlg string
 	switch strings.ToLower(tags["a"]) {
 	case "rsa-sha256":
-		hashType = crypto.SHA256
+		hashType, hashAlg = crypto.SHA256, "sha256"
 	case "rsa-sha1":
-		hashType = crypto.SHA1
+		hashType, hashAlg = crypto.SHA1, "sha1"
 	default:
 		return permfail("unsupported algorithm " + tags["a"])
 	}
@@ -237,7 +241,7 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	}
 
 	// ── Public key via DNS ───────────────────────────────────────────
-	pub, kres := FetchKey(ctx, tags["s"], tags["d"], resolver)
+	pub, kres := FetchKey(ctx, tags["s"], tags["d"], hashAlg, resolver)
 	if kres != "" {
 		res.Result = kres
 		res.Reason = "key lookup: " + res.Reason
@@ -300,10 +304,13 @@ func domainAligned(idomain, d string) bool {
 }
 
 // FetchKey resolves and parses a signer's RSA public key from its DKIM key
-// record at <selector>._domainkey.<domain>. On success it returns (key, ""); on
-// failure it returns (nil, result) where result is ResultTempError (transient
-// DNS failure) or ResultPermError (missing, revoked or malformed key).
-func FetchKey(ctx context.Context, selector, domain string, resolver TXTResolver) (*rsa.PublicKey, string) {
+// record at <selector>._domainkey.<domain>. hashAlg is the hash half of the
+// verifying signature's a= tag ("sha256" / "sha1"); a key record whose h= tag
+// is present but does not list hashAlg is ignored (RFC 6376 §3.6.1 / §6.1.2).
+// On success it returns (key, ""); on failure it returns (nil, result) where
+// result is ResultTempError (transient DNS failure) or ResultPermError (missing,
+// revoked, malformed, or hash-algorithm-disallowed key).
+func FetchKey(ctx context.Context, selector, domain, hashAlg string, resolver TXTResolver) (*rsa.PublicKey, string) {
 	name := RecordName(selector, domain)
 	records, err := resolver(ctx, name)
 	if err != nil {
@@ -320,6 +327,17 @@ func FetchKey(ctx context.Context, selector, domain string, resolver TXTResolver
 		// caller returns PERMFAIL (no usable key).
 		kt, err := ParseTagListStrict(rec)
 		if err != nil {
+			continue
+		}
+		// RFC 6376 §3.6.1 / §6.1.2: the key record's h= tag, when present, lists
+		// the hash algorithms the domain permits with this key. If the signature's
+		// hash algorithm (hashAlg, the hash half of its a= tag) is not among them,
+		// this record MUST be ignored — skip it so the caller PERMFAILs when no
+		// other record permits the algorithm. This closes an algorithm-downgrade
+		// acceptance avenue whereby a key the domain published for one hash is used
+		// to accept a signature under an algorithm it never authorized. An h= tag
+		// present but empty lists nothing acceptable, so it too excludes the key.
+		if _, ok := kt["h"]; ok && !keyRecordAllowsHash(kt["h"], hashAlg) {
 			continue
 		}
 		if kt["p"] == "" {
@@ -341,6 +359,24 @@ func FetchKey(ctx context.Context, selector, domain string, resolver TXTResolver
 		}
 	}
 	return nil, ResultPermError
+}
+
+// keyRecordAllowsHash reports whether a DKIM key record's h= tag value (hTag) —
+// a colon-separated list of acceptable hash algorithm names, RFC 6376 §3.6.1 —
+// permits the hash algorithm named hashAlg ("sha1" or "sha256", the hash half
+// of the signature's a= tag). Names are matched case-insensitively with the
+// folding whitespace §3.6.1 allows around each ":" ignored; an unrecognized
+// name in the list simply does not match (§3.6.1: "Unrecognized algorithms MUST
+// be ignored"). It reports only list membership: whether the h= tag is present
+// at all (absent = no restriction) is the caller's decision, so an empty hTag —
+// a list with no members — returns false here.
+func keyRecordAllowsHash(hTag, hashAlg string) bool {
+	for _, alg := range strings.Split(hTag, ":") {
+		if strings.EqualFold(strings.TrimSpace(alg), hashAlg) {
+			return true
+		}
+	}
+	return false
 }
 
 // BuildSignedHeaders assembles the canonicalized header block that a signature's
