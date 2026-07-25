@@ -340,6 +340,149 @@ func TestVerify_BodyLengthExceedsBody(t *testing.T) {
 	}
 }
 
+// ── d=/i= identity alignment (RFC 6376 §6.1.1 / §3.5) ────────────────────
+
+// signWithIdentity signs a message exactly like signTestMessage (relaxed/
+// relaxed) but adds an explicit i= (AUID) tag to the signature — the tag is
+// part of the signed data, so the resulting signature verifies as far as the
+// crypto is concerned. It is the fixture for the alignment tests: without an
+// alignment check a signature valid for d= can assert an i= in any domain and
+// still pass.
+func signWithIdentity(t *testing.T, priv *rsa.PrivateKey, d, s, iTag string, fields []string, body string) []byte {
+	t.Helper()
+	const hcanon, bcanon = "relaxed", "relaxed"
+
+	bodyHash := sha256.Sum256([]byte(CanonicalizeBody(body, bcanon)))
+	bh := base64.StdEncoding.EncodeToString(bodyHash[:])
+
+	var names []string
+	hdrs := make([]Header, 0, len(fields))
+	for _, f := range fields {
+		eq := strings.IndexByte(f, ':')
+		hdrs = append(hdrs, Header{Name: strings.TrimSpace(f[:eq]), Value: f[eq+1:], Raw: f})
+		names = append(names, strings.ToLower(strings.TrimSpace(f[:eq])))
+	}
+	hlist := strings.Join(names, ":")
+
+	sigVal := " v=1; a=rsa-sha256; c=" + hcanon + "/" + bcanon +
+		"; d=" + d + "; s=" + s + "; i=" + iTag + "; h=" + hlist + "; bh=" + bh + "; b="
+
+	var sb strings.Builder
+	for _, h := range hdrs {
+		sb.WriteString(CanonicalizeHeader(h, hcanon))
+		sb.WriteString("\r\n")
+	}
+	sigHdr := Header{Name: "DKIM-Signature", Value: sigVal, Raw: "DKIM-Signature:" + sigVal}
+	sb.WriteString(CanonicalizeHeader(sigHdr, hcanon))
+
+	hashed := sha256.Sum256([]byte(sb.String()))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, hashed[:])
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(sig)
+
+	var msg strings.Builder
+	msg.WriteString("DKIM-Signature:" + sigVal + b64 + "\r\n")
+	for _, f := range fields {
+		msg.WriteString(f + "\r\n")
+	}
+	msg.WriteString("\r\n")
+	msg.WriteString(body)
+	return []byte(msg.String())
+}
+
+// TestVerify_UnalignedIdentityRejected is the red-green anchor for issue #5:
+// the message is signed correctly for d=example.test but asserts an AUID
+// (i=mallory@evil.example) in an unrelated domain. Before the fix the verifier
+// ignores i= entirely and returns pass (the AUID-spoofing vuln); RFC 6376
+// §6.1.1 requires PERMFAIL (domain mismatch) because evil.example is neither
+// example.test nor a subdomain of it.
+func TestVerify_UnalignedIdentityRejected(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signWithIdentity(t, priv, "example.test", "sel", "mallory@evil.example", fields(), "Body.\r\n")
+
+	results := Verify(context.Background(), raw, testKeyResolver(t, pubPEM, "sel", "example.test"))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPermError {
+		t.Errorf("want permerror on unaligned i=, got %s (%s)", results[0].Result, results[0].Reason)
+	}
+	if !strings.Contains(results[0].Reason, "not aligned") {
+		t.Errorf("want a domain-mismatch reason, got %q", results[0].Reason)
+	}
+}
+
+// TestVerify_AlignedIdentityVerifies keeps the legitimate cases passing: an i=
+// whose domain is exactly d=, a subdomain of d=, or (empty local part) equal to
+// d= must still verify.
+func TestVerify_AlignedIdentityVerifies(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	resolver := testKeyResolver(t, pubPEM, "sel", "example.test")
+
+	for _, iTag := range []string{
+		"user@example.test",     // exactly d=
+		"user@sub.example.test", // subdomain of d=
+		"user@EXAMPLE.TEST",     // case-insensitive match of d=
+		"@example.test",         // empty local part, domain == d=
+	} {
+		t.Run(iTag, func(t *testing.T) {
+			raw := signWithIdentity(t, priv, "example.test", "sel", iTag, fields(), "Body.\r\n")
+			results := Verify(context.Background(), raw, resolver)
+			if len(results) != 1 {
+				t.Fatalf("want 1 result, got %d", len(results))
+			}
+			if results[0].Result != ResultPass {
+				t.Errorf("want pass on aligned i=%s, got %s (%s)", iTag, results[0].Result, results[0].Reason)
+			}
+		})
+	}
+}
+
+// TestDomainAligned pins the alignment predicate directly: equality and true
+// subdomains (on a dot boundary) align; unrelated domains, a bare suffix that
+// is not on a dot boundary, and empty inputs do not. Comparison is
+// case-insensitive.
+func TestDomainAligned(t *testing.T) {
+	cases := []struct {
+		idomain, d string
+		want       bool
+	}{
+		{"example.test", "example.test", true},
+		{"sub.example.test", "example.test", true},
+		{"deep.sub.example.test", "example.test", true},
+		{"EXAMPLE.test", "example.TEST", true},
+		{"evil.example", "example.test", false},
+		{"example.test.evil.example", "example.test", false}, // d= is a prefix, not a parent
+		{"notexample.test", "example.test", false},           // suffix but not on a dot boundary
+		{"", "example.test", false},
+		{"example.test", "", false},
+	}
+	for _, c := range cases {
+		if got := domainAligned(c.idomain, c.d); got != c.want {
+			t.Errorf("domainAligned(%q,%q)=%v want %v", c.idomain, c.d, got, c.want)
+		}
+	}
+}
+
+// TestIdentityDomain pins the i= domain extraction: the domain is everything
+// after the LAST "@" (a quoted local part may itself contain "@"), and a value
+// with no "@" is malformed.
+func TestIdentityDomain(t *testing.T) {
+	if d, ok := identityDomain("user@example.test"); !ok || d != "example.test" {
+		t.Errorf("identityDomain simple: got %q,%v", d, ok)
+	}
+	if d, ok := identityDomain(`"weird@local"@example.test`); !ok || d != "example.test" {
+		t.Errorf("identityDomain last-@: got %q,%v", d, ok)
+	}
+	if _, ok := identityDomain("no-at-sign"); ok {
+		t.Error("i= without @ should be reported malformed")
+	}
+}
+
 // publicPEM renders a private key's public half exactly as GenerateKey does
 // (PKIX SubjectPublicKeyInfo), which is what RecordValue consumes.
 func publicPEM(t *testing.T, priv *rsa.PrivateKey) string {
