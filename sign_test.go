@@ -75,6 +75,38 @@ func TestSign_TamperFails(t *testing.T) {
 	}
 }
 
+func TestSign_RequiresFrom(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	raw := buildRaw("body\r\n")
+
+	// A caller-supplied header list that omits From must be rejected: RFC 6376
+	// §5.4 requires the From field to be signed, and a signature whose h= omits
+	// it is rejected by every conforming verifier. Emitting it silently (as the
+	// old code did) is the bug.
+	if _, err := Sign([]byte(raw), SignOptions{
+		Domain: "example.test", Selector: "default", PrivateKey: priv,
+		Headers: []string{"to", "subject", "date"},
+	}); err == nil {
+		t.Fatal("Sign accepted a header list omitting From; RFC 6376 §5.4 requires From to be signed")
+	}
+
+	// The requirement is case-insensitive and tolerant of surrounding space:
+	// a padded, upper-case "From" satisfies it and must NOT error.
+	if _, err := Sign([]byte(raw), SignOptions{
+		Domain: "example.test", Selector: "default", PrivateKey: priv,
+		Headers: []string{" FROM ", "subject"},
+	}); err != nil {
+		t.Fatalf("mixed-case/padded From should be accepted: %v", err)
+	}
+
+	// The default (empty) header list includes From and must keep working.
+	if _, err := Sign([]byte(raw), SignOptions{
+		Domain: "example.test", Selector: "default", PrivateKey: priv,
+	}); err != nil {
+		t.Fatalf("default header list should be accepted: %v", err)
+	}
+}
+
 func TestSign_OnlySignsPresentHeaders(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	// Request signing Cc (absent) — it must be omitted from h=, and still verify.
