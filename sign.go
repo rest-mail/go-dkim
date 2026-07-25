@@ -71,6 +71,21 @@ func Sign(rawMessage []byte, opt SignOptions) (string, error) {
 		wantHeaders = defaultSignedHeaders
 	}
 
+	// RFC 6376 §5.4: the From header field MUST be signed. Refuse a caller header
+	// list that omits it rather than emit a signature no conforming verifier will
+	// accept. The check is case-insensitive and space-tolerant, matching how the
+	// names are normalized below.
+	requestsFrom := false
+	for _, name := range wantHeaders {
+		if strings.EqualFold(strings.TrimSpace(name), "from") {
+			requestsFrom = true
+			break
+		}
+	}
+	if !requestsFrom {
+		return "", fmt.Errorf("dkim.Sign: the From header must be signed (RFC 6376 §5.4); include \"from\" in SignOptions.Headers")
+	}
+
 	allHeaders, body := SplitMessage(rawMessage)
 
 	// Only sign headers that exist, preserving the requested order.
@@ -84,6 +99,21 @@ func Sign(rawMessage []byte, opt SignOptions) (string, error) {
 			signed = append(signed, strings.ToLower(strings.TrimSpace(name)))
 		}
 	}
+
+	// From was requested, but the present-filter drops any header the message
+	// lacks. If the message itself carries no From header, the h= list still
+	// wouldn't cover From — again invalid under RFC 6376 §5.4, so refuse.
+	signedFrom := false
+	for _, name := range signed {
+		if name == "from" {
+			signedFrom = true
+			break
+		}
+	}
+	if !signedFrom {
+		return "", fmt.Errorf("dkim.Sign: message has no From header to sign (RFC 6376 §5.4)")
+	}
+
 	hTag := strings.Join(signed, ":")
 
 	// Body hash.
