@@ -1455,3 +1455,109 @@ func TestParseKeyFlags(t *testing.T) {
 		}
 	}
 }
+
+// ── Key-record s= service type (RFC 6376 §3.6.1) ─────────────────────────
+
+// keyRecordWithService renders a valid DKIM key record for the given public PEM
+// and appends an s= tag carrying svcs (e.g. "email", "tlsa", or "email:tlsa"),
+// yielding the TXT value a resolver publishes for a key whose service-type list
+// restricts which services the key may be used for.
+func keyRecordWithService(t *testing.T, pubPEM, svcs string) string {
+	t.Helper()
+	rec, err := RecordValue(pubPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec + "; s=" + svcs
+}
+
+// TestVerify_KeyServiceTypeNotEmailRejected is the red-green anchor for issue
+// #12: the message is signed correctly, but the key record published in DNS
+// carries s=tlsa — declaring the ONLY service type the domain permits with this
+// key, and it is not email. RFC 6376 §3.6.1 makes s= the per-key colon-separated
+// list of service types the key may be used for (default "*", all); a verifier
+// evaluating an email signature must use the key only if the list contains
+// "email" or "*". Before the fix the s= tag was never read, so a key restricted
+// to tlsa still verified an email signature — the key was used for a service the
+// domain never authorized it for. The fix PERMFAILs.
+func TestVerify_KeyServiceTypeNotEmailRejected(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
+
+	rec := keyRecordWithService(t, pubPEM, "tlsa") // key permits tlsa only, not email
+	results := Verify(context.Background(), raw, keyRecordResolver("sel", "example.test", rec))
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Result != ResultPermError {
+		t.Errorf("email signature against an s=tlsa key must PERMFAIL, got %s (%s)",
+			results[0].Result, results[0].Reason)
+	}
+	if !strings.Contains(results[0].Reason, "service") {
+		t.Errorf("want a service-type reason, got %q", results[0].Reason)
+	}
+}
+
+// TestVerify_KeyServiceTypeEmailVerifies confirms the s= enforcement does not
+// over-reach: when the key record's s= list DOES cover email — via the "email"
+// service on its own, the wildcard "*", email alongside another service, in
+// either order, with the folding whitespace §3.6.1 permits around the colon, and
+// alongside an unrecognized service type that §3.6.1 says to ignore rather than
+// let veto the match — verification still passes. Absent s= (default "*") is
+// covered separately below.
+func TestVerify_KeyServiceTypeEmailVerifies(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	pubPEM := publicPEM(t, priv)
+	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
+
+	for _, svcs := range []string{"email", "*", "email:tlsa", "tlsa:email", "email : tlsa", "*:tlsa", "email:x-future-svc"} {
+		t.Run(svcs, func(t *testing.T) {
+			rec := keyRecordWithService(t, pubPEM, svcs)
+			results := Verify(context.Background(), raw, keyRecordResolver("sel", "example.test", rec))
+			if len(results) != 1 || results[0].Result != ResultPass {
+				t.Fatalf("s=%q covers email; want pass, got %+v", svcs, results)
+			}
+		})
+	}
+
+	// s= absent: default is "*" (all services), so an email signature verifies.
+	rec := mustRecord(t, pubPEM)
+	if r := Verify(context.Background(), raw, keyRecordResolver("sel", "example.test", rec)); len(r) != 1 || r[0].Result != ResultPass {
+		t.Fatalf("absent s= (default *) should pass, got %+v", r)
+	}
+}
+
+// TestKeyRecordAllowsService pins the s= list-matching helper directly: email is
+// permitted when the colon-separated list contains "email" or the wildcard "*",
+// matched case-insensitively with surrounding folding whitespace ignored, and an
+// unrecognized service type must neither match nor suppress a sibling "email"/"*".
+// An empty list permits nothing.
+func TestKeyRecordAllowsService(t *testing.T) {
+	allow := []struct{ sTag string }{
+		{"email"},
+		{"EMAIL"},
+		{"*"},
+		{"email:tlsa"},
+		{"tlsa:email"},
+		{" tlsa : email "},
+		{"*:tlsa"},
+		{"x-unknown:email"},
+	}
+	for _, c := range allow {
+		if !keyRecordAllowsService(c.sTag) {
+			t.Errorf("keyRecordAllowsService(%q) = false, want true", c.sTag)
+		}
+	}
+	deny := []struct{ sTag string }{
+		{"tlsa"},
+		{"notemail"},
+		{"tlsa:x-unknown"},
+		{""},
+	}
+	for _, c := range deny {
+		if keyRecordAllowsService(c.sTag) {
+			t.Errorf("keyRecordAllowsService(%q) = true, want false", c.sTag)
+		}
+	}
+}
