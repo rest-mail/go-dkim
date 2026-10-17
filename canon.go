@@ -10,6 +10,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // SplitMessage normalizes line endings to CRLF and splits a raw RFC 5322
@@ -75,7 +76,7 @@ func parseHeaders(block string) []Header {
 // after the trailing signature header being verified).
 func CanonicalizeHeader(h Header, canon string) string {
 	if canon == "relaxed" {
-		return strings.ToLower(strings.TrimSpace(h.Name)) + ":" + relaxHeaderValue(h.Value)
+		return strings.ToLower(strings.Trim(h.Name, " \t")) + ":" + relaxHeaderValue(h.Value)
 	}
 	// simple: the field exactly as it appeared.
 	return h.Raw
@@ -154,8 +155,9 @@ func relaxBodyLine(line string) string {
 }
 
 // ParseTagList parses a DKIM tag=value list ("k=v; k2=v2") into a map. Keys and
-// the ends of values are trimmed; internal FWS in values is preserved (callers
-// strip it via StripWSP where it is insignificant, e.g. b=, bh=, p=). It parses
+// the ends of values are trimmed of folding whitespace (see trimFWS) and
+// nothing else; internal FWS in values is preserved (callers strip it via
+// StripWSP where it is insignificant, e.g. b=, bh=, p=). It parses
 // DKIM-Signature, DKIM key records, and ARC header (i=, cv=, …) tag lists alike.
 func ParseTagList(s string) map[string]string {
 	out := map[string]string{}
@@ -164,11 +166,11 @@ func ParseTagList(s string) map[string]string {
 		if eq < 0 {
 			continue
 		}
-		key := strings.TrimSpace(seg[:eq])
+		key := trimFWS(seg[:eq])
 		if key == "" {
 			continue
 		}
-		out[key] = strings.TrimSpace(seg[eq+1:])
+		out[key] = trimFWS(seg[eq+1:])
 	}
 	return out
 }
@@ -188,34 +190,62 @@ func ParseTagList(s string) map[string]string {
 //   - A tag name that is not ALPHA *ALNUMPUNC (an empty one, say), or a value
 //     with a character outside VALCHAR and folding whitespace, is malformed and
 //     is an error.
+//   - The only whitespace is FWS: SP, HTAB and CRLF folding (RFC 5322 §3.2.2).
+//     Any other whitespace — a form feed, a vertical tab, U+0085, U+00A0 — is
+//     an error wherever it appears, so "i\f=1" is not read as "i=1".
 //
 // On any violation it returns a nil map and an error, so a caller verifying a
 // DKIM-Signature or a DNS key record can PERMFAIL (or skip the record) rather
 // than resolve a malformed list to an arbitrary value.
 func ParseTagListStrict(s string) (map[string]string, error) {
+	if r, ok := nonFWSSpace(s); ok {
+		return nil, fmt.Errorf("tag-list contains %q (%U), whitespace that is not folding whitespace", r, r)
+	}
 	out := map[string]string{}
 	for _, seg := range strings.Split(s, ";") {
 		eq := strings.IndexByte(seg, '=')
 		if eq < 0 {
-			if strings.TrimSpace(seg) == "" {
+			if trimFWS(seg) == "" {
 				continue // empty segment: trailing ";" or surrounding FWS
 			}
-			return nil, fmt.Errorf("malformed tag-list segment %q (missing '=')", strings.TrimSpace(seg))
+			return nil, fmt.Errorf("malformed tag-list segment %q (missing '=')", trimFWS(seg))
 		}
-		key := strings.TrimSpace(seg[:eq])
+		key := trimFWS(seg[:eq])
 		if !validTagName(key) {
 			return nil, fmt.Errorf("malformed tag name %q in tag-list", key)
 		}
 		if _, dup := out[key]; dup {
 			return nil, fmt.Errorf("duplicate tag %q in tag-list", key)
 		}
-		val := strings.TrimSpace(seg[eq+1:])
+		val := trimFWS(seg[eq+1:])
 		if !validTagValue(val) {
 			return nil, fmt.Errorf("malformed value for tag %q in tag-list", key)
 		}
 		out[key] = val
 	}
 	return out, nil
+}
+
+// fws holds the characters of folding whitespace, the only whitespace RFC 6376
+// allows around tag names, "=", values, ";" (§3.2) and the ":" of a list such
+// as h= (§3.5, §3.6.1): the SP and HTAB of WSP and the CR and LF of a fold (RFC
+// 5322 §3.2.2). strings.TrimSpace is wrong for wire data: it also strips a form
+// feed, a vertical tab, U+0085 and U+00A0, which are not whitespace there.
+const fws = " \t\r\n"
+
+// trimFWS removes the folding whitespace around s, and nothing else.
+func trimFWS(s string) string { return strings.Trim(s, fws) }
+
+// nonFWSSpace returns the first rune in s that Unicode counts as whitespace but
+// folding whitespace does not ("\f", "\v", U+0085, U+00A0, ...), and whether
+// there is one.
+func nonFWSSpace(s string) (rune, bool) {
+	for _, r := range s {
+		if unicode.IsSpace(r) && !strings.ContainsRune(fws, r) {
+			return r, true
+		}
+	}
+	return 0, false
 }
 
 // validTagName reports whether name matches the RFC 6376 §3.2 tag-name ABNF,
@@ -267,7 +297,7 @@ func RemoveBValue(field string) string {
 		}
 		// Tag names are case-sensitive (RFC 6376 §3.2): "B=" is an unknown tag,
 		// hashed as it is, not the signature.
-		if eq := strings.IndexByte(seg, '='); eq >= 0 && strings.TrimSpace(seg[:eq]) == "b" {
+		if eq := strings.IndexByte(seg, '='); eq >= 0 && trimFWS(seg[:eq]) == "b" {
 			b.WriteString(seg[:eq+1]) // keep "b=", drop the value
 		} else {
 			b.WriteString(seg)
@@ -329,7 +359,7 @@ func parseUint(s string) (int, error) {
 // int64 so the epoch-second comparison against the current time is correct on a
 // 32-bit platform (where int would overflow beyond year 2038).
 func parseTimeTag(s string) (int64, error) {
-	s = strings.TrimSpace(s)
+	s = trimFWS(s)
 	if s == "" || len(s) > 12 {
 		return 0, strconv.ErrSyntax
 	}

@@ -8,22 +8,23 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // validResults are the six results Verify may report.
 var validResults = []string{ResultPass, ResultFail, ResultNeutral, ResultNone, ResultTempError, ResultPermError}
 
 // FuzzParseTagList checks the tag-list parsers on any input: neither panics; a
-// list the strict parser accepts has only valid names and values, the lenient
-// parser reads it the same way, and writing it back out parses to the same
-// tags.
+// list the strict parser accepts has no whitespace but FWS, only valid names
+// and values, the lenient parser reads it the same way, and writing it back
+// out parses to the same tags.
 //
-// checklist: DKIM-TAG-01 DKIM-VER-16
+// checklist: DKIM-TAG-01 DKIM-TAG-08 DKIM-VER-16
 func FuzzParseTagList(f *testing.F) {
 	for _, seed := range []string{
 		"v=1; a=rsa-sha256; d=example.com; s=sel; h=from:to; bh=AAAA; b=BBBB",
 		"v=DKIM1; k=ed25519; p=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
-		" a = b c ;\r\n\tb=x\r\n y ; c=", "a=1; a=2", "=x", "a", ";;", "1a=b", "a_1=b", "a=\x01", "a=b;",
+		" a = b c ;\r\n\tb=x\r\n y ; c=", "a=1; a=2", "=x", "a", ";;", "1a=b", "a_1=b", "a=\x01", "a=b;", "i\f=1", "a=b;\v",
 	} {
 		f.Add(seed)
 	}
@@ -32,6 +33,11 @@ func FuzzParseTagList(f *testing.F) {
 		strict, err := ParseTagListStrict(s)
 		if err != nil {
 			return
+		}
+		for _, r := range s {
+			if unicode.IsSpace(r) && r != ' ' && r != '\t' && r != '\r' && r != '\n' {
+				t.Fatalf("accepted %q, which holds %U, whitespace that is not FWS", s, r)
+			}
 		}
 		keys := make([]string, 0, len(strict))
 		for k, v := range strict {
