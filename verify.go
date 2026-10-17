@@ -223,7 +223,7 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	if flags.NoSubdomain {
 		if iTag := tags["i"]; iTag != "" {
 			idomain, _ := identityDomain(iTag)
-			if !strings.EqualFold(strings.TrimSpace(idomain), strings.TrimSpace(tags["d"])) {
+			if !strings.EqualFold(trimFWS(idomain), trimFWS(tags["d"])) {
 				return permfail(fmt.Sprintf("i= domain %q must equal d= domain %q exactly: key record forbids subdomaining (t=s)", idomain, tags["d"]))
 			}
 		}
@@ -401,7 +401,7 @@ func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, al
 // makes From mandatory in h=; §6.1.1 requires PERMFAIL when it is absent.
 func headerListCoversFrom(hTag string) bool {
 	for _, name := range strings.Split(hTag, ":") {
-		if strings.EqualFold(strings.TrimSpace(name), "from") {
+		if strings.EqualFold(trimFWS(name), "from") {
 			return true
 		}
 	}
@@ -425,8 +425,8 @@ func identityDomain(iTag string) (string, bool) {
 // subdomain of, the signing domain d (RFC 6376 §6.1.1), compared
 // case-insensitively. An empty idomain or d is never aligned.
 func domainAligned(idomain, d string) bool {
-	idomain = strings.ToLower(strings.TrimSpace(idomain))
-	d = strings.ToLower(strings.TrimSpace(d))
+	idomain = strings.ToLower(trimFWS(idomain))
+	d = strings.ToLower(trimFWS(d))
 	if idomain == "" || d == "" {
 		return false
 	}
@@ -609,14 +609,14 @@ func verifyHash(pub crypto.PublicKey, hashed, sig []byte) bool {
 // tag in the record.
 func firstTagName(rec string) string {
 	for _, seg := range strings.Split(rec, ";") {
-		if strings.TrimSpace(seg) == "" {
+		if trimFWS(seg) == "" {
 			continue
 		}
 		eq := strings.IndexByte(seg, '=')
 		if eq < 0 {
 			return ""
 		}
-		return strings.TrimSpace(seg[:eq])
+		return trimFWS(seg[:eq])
 	}
 	return ""
 }
@@ -639,7 +639,7 @@ func keyRecordAllowsHash(hTag, hashAlg string) bool {
 // ":". Values are case-sensitive (RFC 6376 §3.2).
 func listContains(list, want string) bool {
 	for _, v := range strings.Split(list, ":") {
-		if strings.TrimSpace(v) == want {
+		if trimFWS(v) == want {
 			return true
 		}
 	}
@@ -674,7 +674,7 @@ func BuildSignedHeaders(hTag string, allHeaders []Header, sig Header, canon stri
 	consumed := map[string]int{}
 	var b strings.Builder
 	for _, name := range strings.Split(hTag, ":") {
-		name = strings.TrimSpace(name)
+		name = trimFWS(name)
 		if name == "" {
 			continue
 		}

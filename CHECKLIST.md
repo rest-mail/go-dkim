@@ -27,6 +27,7 @@ say) says "n/a" and why. CI checks this file against the tests with
 | DKIM-TAG-05 | 3.2 | MUST | Retain whitespace within a value; whitespace around it is not part of it. | `TestTagValueWhitespace` |
 | DKIM-TAG-06 | 3.2 | MUST | Ignore unrecognized tags. | `TestUnknownTagsIgnored` |
 | DKIM-TAG-07 | 2.10, 3.5 | Normative | Base64 values may be folded with FWS and may omit their padding. | `TestDecodeBase64Tag`, `TestVerify_UnpaddedBase64Accepted` |
+| DKIM-TAG-08 | 3.2, 3.5, 3.6.1 | Normative | The only whitespace around tag names, "=", values, ";" and list separators is FWS (SP, HTAB, CRLF folding); any other whitespace is malformed. | `TestParseTagListStrictFWS`, `TestWireWhitespaceIsFWS`, `FuzzParseTagList` |
 
 ## Algorithms and keys (§3.3, RFC 8301, RFC 8463)
 

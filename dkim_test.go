@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -47,6 +48,70 @@ func TestParseTagListStrict(t *testing.T) {
 	// An empty tag name ("=value") is malformed (tag-name = ALPHA *ALNUMPUNC).
 	if _, err := ParseTagListStrict("v=1; =oops"); err == nil {
 		t.Error("empty tag name must be rejected")
+	}
+}
+
+// TestParseTagListStrictFWS checks that folding whitespace is the only
+// whitespace a tag-list may hold (RFC 6376 §3.2, RFC 5322 §3.2.2): SP, HTAB and
+// a CRLF fold around a name, "=", a value and ";" still parse, while a form
+// feed, a vertical tab, U+0085 or U+00A0 — before or after a tag name, before
+// "=", or in a value — is refused with an error naming it, so "i\f=1" is not
+// read as "i=1".
+//
+// checklist: DKIM-TAG-08
+func TestParseTagListStrictFWS(t *testing.T) {
+	for _, s := range []string{"i=1", " i = 1 ;", "\ti\t=\t1\t", "\r\n i\r\n\t=\r\n 1\r\n\t;\r\n a=b"} {
+		if tags, err := ParseTagListStrict(s); err != nil || tags["i"] != "1" {
+			t.Errorf("%q: got %q, %v; want i=1", s, tags, err)
+		}
+	}
+	for _, ws := range []rune{'\f', '\v', '\u0085', '\u00a0'} {
+		w := string(ws)
+		for _, s := range []string{w + "i=1", "i" + w + "=1", "i=" + w + "1", "i=1" + w + "2", "i=1" + w, "i=1;" + w} {
+			_, err := ParseTagListStrict(s)
+			if err == nil {
+				t.Errorf("%q accepted", s)
+			} else if !strings.Contains(err.Error(), fmt.Sprintf("%U", ws)) {
+				t.Errorf("%q: error %q does not name %U", s, err, ws)
+			}
+		}
+	}
+	// The lenient parser does not read such a name as the bare one either.
+	if v, ok := ParseTagList("i\f=1")["i"]; ok {
+		t.Errorf("ParseTagList read i\\f=1 as i=%q", v)
+	}
+}
+
+// TestWireWhitespaceIsFWS checks that the code reading tag names, the ":"
+// lists of h= and s=, the i= and d= domains and the t= timestamp trims only
+// folding whitespace (RFC 6376 §3.2, §3.5, §3.6.1), so other whitespace stays
+// part of the text and does not match.
+//
+// checklist: DKIM-TAG-08
+func TestWireWhitespaceIsFWS(t *testing.T) {
+	if got := RemoveBValue("v=1; b\f=keep; b =drop"); got != "v=1; b\f=keep; b =" {
+		t.Errorf("RemoveBValue = %q", got)
+	}
+	if got := firstTagName("\r\n v =DKIM1"); got != "v" {
+		t.Errorf("firstTagName with FWS = %q", got)
+	}
+	if got := firstTagName("\u00a0v=DKIM1"); got != "\u00a0v" {
+		t.Errorf("firstTagName with U+00A0 = %q", got)
+	}
+	if !listContains(" sha1 :\r\n\tsha256 ", "sha256") || listContains("sha256\v", "sha256") {
+		t.Error("listContains trims something other than FWS")
+	}
+	if !headerListCoversFrom("to : from") || headerListCoversFrom("to:from\f") {
+		t.Error("headerListCoversFrom trims something other than FWS")
+	}
+	if !domainAligned(" mail.example.test", "example.test ") || domainAligned("example.test\u0085", "example.test") {
+		t.Error("domainAligned trims something other than FWS")
+	}
+	if _, err := parseTimeTag("\f1700000000"); err == nil {
+		t.Error("parseTimeTag accepted a form feed")
+	}
+	if got := BuildSignedHeaders(" from \f", []Header{{Name: "From", Value: " a", Raw: "From: a"}}, Header{Name: "S", Value: "b=x", Raw: "S:b=x"}, "relaxed"); got != "s:b=" {
+		t.Errorf("BuildSignedHeaders signed \"from\\f\" as From: %q", got)
 	}
 }
 

@@ -4,7 +4,25 @@ All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html); releases are Go
 module tags of the form `vMAJOR.MINOR.PATCH`.
 
-## [Unreleased]
+## [0.3.1] - 2026-10-17
+
+### Fixed
+
+- `ParseTagListStrict` trimmed tag names and values with `strings.TrimSpace`,
+  which also strips a form feed, a vertical tab, U+0085 and U+00A0, so
+  `i\f=1` read as `i=1`. RFC 6376 §3.2 allows only FWS around a tag name, "=",
+  a value and ";", and FWS (RFC 5322 §3.2.2) is SP, HTAB and CRLF folding. Any
+  other whitespace anywhere in a tag-list is now refused, with an error naming
+  the character, so a DKIM-Signature or key record carrying one is malformed
+  (PERMFAIL, or the record is skipped). Found by go-arc's fuzzer (go-arc#36).
+- The other places that read wire data trim only FWS too: `ParseTagList`,
+  `RemoveBValue` (a `b\f=` tag is no longer blanked as `b=`), the `h=` lists
+  of a signature and a key record, the key record's `s=` list and first tag,
+  the `i=` and `d=` domains, and the `t=`/`x=` timestamps. Relaxed header
+  canonicalization trims only WSP (SP, HTAB) around a field name (§3.4.2).
+  No API change. (rest-mail/rest-mail-server#374)
+
+## [0.3.0] - 2026-10-17
 
 The API stays compatible where that cost nothing: `SignOptions` keeps its
 fields, `PrivateKey` widened to a `crypto.Signer` (which an `*rsa.PrivateKey`
