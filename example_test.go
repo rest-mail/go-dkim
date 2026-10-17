@@ -12,6 +12,8 @@ import (
 // keypair once, sign with the private half, publish the public half as the DNS
 // TXT record at <selector>._domainkey.<domain>, and let Verify resolve it over
 // system DNS by passing a nil resolver.
+//
+// checklist: DKIM-SIGN-02 DKIM-SIGN-12
 func Example() {
 	// Generate a keypair. Keep the private key for signing; publish the public
 	// half as the DNS record verifiers look up.

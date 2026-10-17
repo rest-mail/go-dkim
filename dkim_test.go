@@ -1,6 +1,9 @@
 package dkim
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
@@ -12,6 +15,8 @@ import (
 // TestParseTagListStrict pins the RFC 6376 §3.2 strict tag-list parser: a
 // well-formed list parses (with a trailing ";" permitted), while a repeated tag
 // name, a non-empty segment lacking "=", or an empty tag name are all rejected.
+//
+// checklist: DKIM-TAG-01 DKIM-TAG-04
 func TestParseTagListStrict(t *testing.T) {
 	// A well-formed list parses; keys and value ends are trimmed.
 	got, err := ParseTagListStrict("v=1; a=rsa-sha256 ; d=example.test")
@@ -45,6 +50,7 @@ func TestParseTagListStrict(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-KEY-09
 func TestRecordName(t *testing.T) {
 	if got := RecordName("default", "mail3.test"); got != "default._domainkey.mail3.test" {
 		t.Errorf("RecordName = %q", got)
@@ -54,8 +60,12 @@ func TestRecordName(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-ALG-05 DKIM-ALG-07 DKIM-KEY-17
 func TestGenerateKeyAndRecordRoundTrip(t *testing.T) {
-	priv, pub, err := GenerateKey(1024) // small for test speed; validity is what matters
+	if _, _, err := GenerateKey(1024); err == nil {
+		t.Error("GenerateKey(1024) succeeded; RFC 8301 asks for at least 2048 bits")
+	}
+	priv, pub, err := GenerateKey(2048)
 	if err != nil {
 		t.Fatalf("GenerateKey: %v", err)
 	}
@@ -92,11 +102,15 @@ func TestGenerateKeyAndRecordRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("p= is not an RSA public key")
 	}
+	if rsaPub.E != 65537 {
+		t.Errorf("public exponent %d, want 65537", rsaPub.E)
+	}
 	if rsaPub.N.Cmp(privKey.N) != 0 || rsaPub.E != privKey.E {
 		t.Error("record public key does not match generated private key")
 	}
 }
 
+// checklist: DKIM-KEY-10
 func TestRecordFragmentChunks(t *testing.T) {
 	// Short value → single quoted string.
 	short := RecordFragment("default._domainkey.d.test", "v=DKIM1; k=rsa; p=abc")
@@ -124,8 +138,14 @@ func TestRecordFragmentChunks(t *testing.T) {
 	if joined != long {
 		t.Error("chunks do not reassemble to the original value")
 	}
+
+	// An empty value is one empty string.
+	if got := RecordFragment("n", ""); got != `txt-record=n,""` {
+		t.Errorf("empty fragment wrong: %s", got)
+	}
 }
 
+// checklist: DKIM-KEY-17
 func TestRecordValueRejectsBadInput(t *testing.T) {
 	if _, err := RecordValue("not a pem"); err == nil {
 		t.Error("expected error for non-PEM input")
@@ -134,5 +154,14 @@ func TestRecordValueRejectsBadInput(t *testing.T) {
 	junk := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: []byte("junk")}))
 	if _, err := RecordValue(junk); err == nil {
 		t.Error("expected error for non-key PEM")
+	}
+	// A public key of a type DKIM has no algorithm for.
+	ec, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, _ := x509.MarshalPKIXPublicKey(&ec.PublicKey)
+	if _, err := RecordValue(string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))); err == nil {
+		t.Error("expected error for an ECDSA key")
 	}
 }
