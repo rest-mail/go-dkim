@@ -21,6 +21,7 @@ import (
 // publishes, independently of any crypto — so a body/header canon bug can't
 // hide behind a self-consistent sign/verify round-trip.
 
+// checklist: DKIM-CANON-06 DKIM-CANON-09
 func TestRelaxedHeaderCanon_RFCExample(t *testing.T) {
 	// "A: X" and the folded "B : Y<TAB>CRLF<TAB>Z  " from §3.4.5.
 	a := Header{Name: "A", Value: " X", Raw: "A: X"}
@@ -33,6 +34,7 @@ func TestRelaxedHeaderCanon_RFCExample(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-CANON-05
 func TestSimpleHeaderCanon_Unchanged(t *testing.T) {
 	b := Header{Name: "B", Value: " Y\t\r\n\tZ  ", Raw: "B : Y\t\r\n\tZ  "}
 	if got := CanonicalizeHeader(b, "simple"); got != "B : Y\t\r\n\tZ  " {
@@ -40,6 +42,7 @@ func TestSimpleHeaderCanon_Unchanged(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-CANON-07 DKIM-CANON-08 DKIM-CANON-09
 func TestBodyCanon_RFCExample(t *testing.T) {
 	body := " C \r\nD \t E\r\n\r\n\r\n"
 	if got := CanonicalizeBody(body, "relaxed"); got != " C\r\nD E\r\n" {
@@ -50,6 +53,7 @@ func TestBodyCanon_RFCExample(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-CANON-07 DKIM-CANON-08
 func TestBodyCanon_Empty(t *testing.T) {
 	if got := CanonicalizeBody("", "simple"); got != "\r\n" {
 		t.Errorf("simple empty body should be CRLF, got %q", got)
@@ -61,6 +65,7 @@ func TestBodyCanon_Empty(t *testing.T) {
 
 // ── removeBValue ─────────────────────────────────────────────────────────
 
+// checklist: DKIM-SIG-01 DKIM-HASH-04
 func TestRemoveBValue(t *testing.T) {
 	in := "v=1; a=rsa-sha256; bh=ABC; h=from:to; b=SIGDATA=="
 	want := "v=1; a=rsa-sha256; bh=ABC; h=from:to; b="
@@ -150,6 +155,7 @@ func fields() []string {
 	}
 }
 
+// checklist: DKIM-ALG-02 DKIM-CANON-01
 func TestVerify_RoundTrip(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 1024)
 	if err != nil {
@@ -181,6 +187,7 @@ func TestVerify_RoundTrip(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-VER-10
 func TestVerify_BodyTamperFails(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -197,6 +204,7 @@ func TestVerify_BodyTamperFails(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-VER-11
 func TestVerify_HeaderTamperFails(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -213,6 +221,7 @@ func TestVerify_HeaderTamperFails(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-VER-02
 func TestVerify_NoSignature(t *testing.T) {
 	raw := "From: a@example.test\r\nSubject: plain\r\n\r\nno dkim here\r\n"
 	results := Verify(context.Background(), []byte(raw), func(_ context.Context, _ string) ([]string, error) {
@@ -222,8 +231,13 @@ func TestVerify_NoSignature(t *testing.T) {
 	if len(results) != 0 {
 		t.Errorf("want no results, got %+v", results)
 	}
+	// A nil resolver means the system's, which an unsigned message never uses.
+	if results := Verify(context.Background(), []byte(raw), nil); len(results) != 0 {
+		t.Errorf("want no results, got %+v", results)
+	}
 }
 
+// checklist: DKIM-KEY-12
 func TestVerify_NoKeyPermError(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
@@ -237,6 +251,7 @@ func TestVerify_NoKeyPermError(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-KEY-13
 func TestVerify_DNSTempError(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
@@ -249,6 +264,7 @@ func TestVerify_DNSTempError(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-KEY-04
 func TestVerify_RevokedKeyPermError(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	raw := signTestMessage(t, priv, "example.test", "sel", "relaxed", "relaxed", fields(), "Body.\r\n")
@@ -261,6 +277,7 @@ func TestVerify_RevokedKeyPermError(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-VER-11
 func TestVerify_WrongKeyFails(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	other, _ := rsa.GenerateKey(rand.Reader, 1024)
@@ -289,6 +306,8 @@ func injectTag(t *testing.T, raw []byte, key, value string) []byte {
 // step before any crypto, so it must be rejected as a syntactically invalid
 // signature (PERMFAIL) — never allowed to slice the body with a negative bound,
 // which panics ("slice bounds out of range [:-1]") and crashes the verifier.
+//
+// checklist: DKIM-SIG-08 DKIM-VER-16
 func TestVerify_NegativeBodyLength(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -309,6 +328,8 @@ func TestVerify_NegativeBodyLength(t *testing.T) {
 
 // TestVerify_PlusBodyLength covers the other non-digit sign form the ABNF
 // forbids: a leading "+" must be rejected exactly like a leading "-".
+//
+// checklist: DKIM-SIG-08
 func TestVerify_PlusBodyLength(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -325,6 +346,8 @@ func TestVerify_PlusBodyLength(t *testing.T) {
 // larger than the canonicalized body must not slice past the end (which would
 // also panic). The whole available body is used, so the injected tag simply
 // breaks the signature — the result is a clean failure, not a crash.
+//
+// checklist: DKIM-SIG-08 DKIM-VER-16
 func TestVerify_BodyLengthExceedsBody(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -398,6 +421,8 @@ func signWithIdentity(t *testing.T, priv *rsa.PrivateKey, d, s, iTag string, fie
 // ignores i= entirely and returns pass (the AUID-spoofing vuln); RFC 6376
 // §6.1.1 requires PERMFAIL (domain mismatch) because evil.example is neither
 // example.test nor a subdomain of it.
+//
+// checklist: DKIM-SIG-07
 func TestVerify_UnalignedIdentityRejected(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -418,6 +443,8 @@ func TestVerify_UnalignedIdentityRejected(t *testing.T) {
 // TestVerify_AlignedIdentityVerifies keeps the legitimate cases passing: an i=
 // whose domain is exactly d=, a subdomain of d=, or (empty local part) equal to
 // d= must still verify.
+//
+// checklist: DKIM-SIG-07
 func TestVerify_AlignedIdentityVerifies(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -446,6 +473,8 @@ func TestVerify_AlignedIdentityVerifies(t *testing.T) {
 // subdomains (on a dot boundary) align; unrelated domains, a bare suffix that
 // is not on a dot boundary, and empty inputs do not. Comparison is
 // case-insensitive.
+//
+// checklist: DKIM-SIG-07
 func TestDomainAligned(t *testing.T) {
 	cases := []struct {
 		idomain, d string
@@ -471,6 +500,8 @@ func TestDomainAligned(t *testing.T) {
 // TestIdentityDomain pins the i= domain extraction: the domain is everything
 // after the LAST "@" (a quoted local part may itself contain "@"), and a value
 // with no "@" is malformed.
+//
+// checklist: DKIM-SIG-07
 func TestIdentityDomain(t *testing.T) {
 	if d, ok := identityDomain("user@example.test"); !ok || d != "example.test" {
 		t.Errorf("identityDomain simple: got %q,%v", d, ok)
@@ -551,6 +582,8 @@ func signOmittingFrom(t *testing.T, priv *rsa.PrivateKey, d, s, body string) []b
 // pass, so the unsigned From can be forged under a valid signature. RFC 6376
 // §6.1.1 requires PERMFAIL ("From field not signed") when h= does not cover
 // from.
+//
+// checklist: DKIM-VER-07
 func TestVerify_FromNotSignedRejected(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -573,6 +606,8 @@ func TestVerify_FromNotSignedRejected(t *testing.T) {
 // §6.1.1 check rejects only the missing-From case and does not disturb a normal
 // signature. (Case-insensitive matching of "from" is pinned directly by
 // TestHeaderListCoversFrom, which avoids mutating the signed h= bytes.)
+//
+// checklist: DKIM-VER-07
 func TestVerify_FromSignedVerifies(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 1024)
 	if err != nil {
@@ -591,6 +626,8 @@ func TestVerify_FromSignedVerifies(t *testing.T) {
 // TestHeaderListCoversFrom pins the h= coverage predicate directly: from is
 // matched case-insensitively and ignoring surrounding whitespace; a list that
 // never names from (or an empty list) is not covered.
+//
+// checklist: DKIM-VER-07
 func TestHeaderListCoversFrom(t *testing.T) {
 	cases := []struct {
 		hTag string
@@ -671,6 +708,8 @@ func signWithDuplicateTag(t *testing.T, priv *rsa.PrivateKey, d, s, dupPrefix st
 // passes and the verifier returns pass — while a first-wins verifier would look
 // up s=bogus and disagree, the cross-implementation divergence RFC 6376 §3.2
 // forbids. The fix rejects the duplicate at parse time and returns PERMFAIL.
+//
+// checklist: DKIM-TAG-04
 func TestVerify_DuplicateTagRejected(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -693,6 +732,8 @@ func TestVerify_DuplicateTagRejected(t *testing.T) {
 // key second). A last-wins parser keeps the valid key and the message verifies;
 // RFC 6376 §3.2 makes the whole record invalid, so the key must be rejected and
 // the result is PERMFAIL (no usable key).
+//
+// checklist: DKIM-TAG-04 DKIM-KEY-14
 func TestVerify_DuplicateTagInKeyRecordRejected(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -756,6 +797,8 @@ func keyRecordResolver(selector, domain, rec string) TXTResolver {
 // avenue by which a key the domain published for sha1 only accepts a stronger
 // (or any other) algorithm it never authorized. The fix skips the record; with
 // no other usable record the verifier PERMFAILs.
+//
+// checklist: DKIM-KEY-02
 func TestVerify_KeyHashAlgorithmNotAllowedRejected(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -778,6 +821,8 @@ func TestVerify_KeyHashAlgorithmNotAllowedRejected(t *testing.T) {
 // folding whitespace §3.6.1 permits around the colon, and alongside an
 // unrecognized algorithm that §3.6.1 says to ignore rather than let veto the
 // match — verification still passes.
+//
+// checklist: DKIM-KEY-02
 func TestVerify_KeyHashAlgorithmAllowedVerifies(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -796,12 +841,14 @@ func TestVerify_KeyHashAlgorithmAllowedVerifies(t *testing.T) {
 
 // TestKeyRecordAllowsHash pins the h= list-matching helper directly: the
 // signature's hash name must appear in the key record's colon-separated h= list,
-// matched case-insensitively with surrounding folding whitespace ignored, and an
-// unrecognized entry must neither match nor suppress a later valid one.
+// matched case-sensitively (RFC 6376 §3.2) with surrounding folding whitespace
+// ignored, and an unrecognized entry must neither match nor suppress a later
+// valid one.
+//
+// checklist: DKIM-TAG-03 DKIM-KEY-02
 func TestKeyRecordAllowsHash(t *testing.T) {
 	allow := []struct{ hTag, alg string }{
 		{"sha256", "sha256"},
-		{"SHA256", "sha256"},
 		{"sha1:sha256", "sha256"},
 		{"sha256:sha1", "sha1"},
 		{" sha1 : sha256 ", "sha256"},
@@ -818,6 +865,7 @@ func TestKeyRecordAllowsHash(t *testing.T) {
 		{"sha1:sha512", "sha256"},
 		{"x-unknown", "sha256"},
 		{"", "sha256"},
+		{"SHA256", "sha256"},
 	}
 	for _, c := range deny {
 		if keyRecordAllowsHash(c.hTag, c.alg) {
@@ -838,6 +886,8 @@ func TestKeyRecordAllowsHash(t *testing.T) {
 // scheme silently honored under DKIM1 rules. The fix skips the record; with no
 // other usable record the verifier PERMFAILs. (This is the DNS KEY record's v=,
 // distinct from the DKIM-Signature header's v= enforced at §3.5 / issue #14.)
+//
+// checklist: DKIM-KEY-01
 func TestVerify_KeyRecordWrongVersionRejected(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -863,6 +913,8 @@ func TestVerify_KeyRecordWrongVersionRejected(t *testing.T) {
 // malformed and MUST NOT be used. Before the fix v= was never inspected, so this
 // record (a valid DKIM1 key by value) verified; the fix skips it and the
 // verifier PERMFAILs.
+//
+// checklist: DKIM-KEY-01
 func TestVerify_KeyRecordVersionNotFirstRejected(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -887,6 +939,8 @@ func TestVerify_KeyRecordVersionNotFirstRejected(t *testing.T) {
 // enforcement must not over-reach. A record that omits v= entirely (default
 // DKIM1, §3.6.1) and one that carries v=DKIM1 as its first tag (case-sensitive,
 // as the RFC requires) both remain usable and the signature verifies.
+//
+// checklist: DKIM-KEY-01
 func TestVerify_KeyRecordVersionAcceptedVerifies(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -914,6 +968,8 @@ func TestVerify_KeyRecordVersionAcceptedVerifies(t *testing.T) {
 // TestFirstTagName pins the ordering helper directly: it returns the name of the
 // first tag in a DKIM tag-list record, ignoring the ABNF's optional leading
 // folding whitespace and empty leading segments, and "" when there is no tag.
+//
+// checklist: DKIM-KEY-01
 func TestFirstTagName(t *testing.T) {
 	cases := []struct{ rec, want string }{
 		{"v=DKIM1; k=rsa; p=AAA", "v"},
@@ -923,6 +979,7 @@ func TestFirstTagName(t *testing.T) {
 		{"p=AAA", "p"},
 		{"", ""},
 		{"   ", ""},
+		{"p; v=DKIM1", ""},
 	}
 	for _, c := range cases {
 		if got := firstTagName(c.rec); got != c.want {
@@ -990,6 +1047,8 @@ func signWithTiming(t *testing.T, priv *rsa.PrivateKey, d, s, timing string, fie
 // passes and it returns pass, letting an old captured message be replayed
 // indefinitely despite the signer's explicit expiry. RFC 6376 §6.1.1 lets a
 // verifier treat an expired signature as invalid; the fix PERMFAILs it.
+//
+// checklist: DKIM-SIG-12
 func TestVerify_ExpiredSignatureRejected(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1021,6 +1080,8 @@ func withFixedNow(t *testing.T, now time.Time) {
 // signature whose x= lies in the future (relative to the injected clock) must
 // still verify. It pins that the §6.1.1 expiry check rejects only expired
 // signatures and leaves a live one untouched.
+//
+// checklist: DKIM-SIG-12
 func TestVerify_NonExpiredSignatureVerifies(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1039,6 +1100,8 @@ func TestVerify_NonExpiredSignatureVerifies(t *testing.T) {
 
 // TestVerify_ExpirationBoundary pins the RFC 6376 §6.1.1 boundary: a signature
 // is expired when now is AT OR AFTER x=, and live strictly before it.
+//
+// checklist: DKIM-SIG-12
 func TestVerify_ExpirationBoundary(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1063,6 +1126,8 @@ func TestVerify_ExpirationBoundary(t *testing.T) {
 // t= and x= are present, x= MUST be greater than t=. An x= <= t= is malformed
 // and PERMFAILs regardless of the current time — the check runs ahead of the
 // expiry comparison, so x==t is rejected as malformed, not merely "expired".
+//
+// checklist: DKIM-SIG-11
 func TestVerify_ExpirationNotAfterTimestampRejected(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1086,6 +1151,8 @@ func TestVerify_ExpirationNotAfterTimestampRejected(t *testing.T) {
 // TestVerify_InvalidExpirationTagRejected pins the RFC 6376 §3.5 x= ABNF
 // (1*12DIGIT): a non-numeric or over-long x= is syntactically invalid and
 // PERMFAILs rather than being silently ignored.
+//
+// checklist: DKIM-SIG-13
 func TestVerify_InvalidExpirationTagRejected(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1107,6 +1174,8 @@ func TestVerify_InvalidExpirationTagRejected(t *testing.T) {
 
 // TestParseTimeTag pins the RFC 6376 §3.5 timestamp ABNF (1*12DIGIT) directly:
 // digits only, non-empty, at most 12 digits; anything else is an error.
+//
+// checklist: DKIM-SIG-10 DKIM-SIG-13
 func TestParseTimeTag(t *testing.T) {
 	good := map[string]int64{"0": 0, "1000000000": 1000000000, "999999999999": 999999999999}
 	for in, want := range good {
@@ -1218,6 +1287,8 @@ func unpaddedKeyResolver(t *testing.T, pubPEM, selector, domain string) TXTResol
 // key record whose base64 values omit the optional "=" padding must still
 // verify. On the pre-fix strict-padded decoder each subtest PERMFAILs with a
 // spurious "invalid base64"; padded inputs must keep verifying unchanged.
+//
+// checklist: DKIM-TAG-07 DKIM-SIG-04
 func TestVerify_UnpaddedBase64Accepted(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 1024)
 	if err != nil {
@@ -1269,6 +1340,8 @@ func TestVerify_UnpaddedBase64Accepted(t *testing.T) {
 // base64 sites (bh=, b=, key p=) share, over the shapes RFC 6376 §2.10 / §3.5
 // permit: padded and unpadded (length ≡ 2 and ≡ 3 mod 4), values carrying folding
 // whitespace, and genuinely invalid input that must still be rejected.
+//
+// checklist: DKIM-TAG-07 DKIM-SIG-04
 func TestDecodeBase64Tag(t *testing.T) {
 	// Inputs chosen so the canonical encoding needs padding: 4 bytes ≡ 1 (mod 3)
 	// → 2 pad chars (encoded length ≡ 3 mod 4); 5 bytes ≡ 2 (mod 3) → 1 pad char
@@ -1388,6 +1461,8 @@ func signWithVersionTag(t *testing.T, priv *rsa.PrivateKey, d, s, versionTag str
 // `!= ""` short-circuit and the signature was accepted (pass) — even though RFC
 // 6376 §3.5 makes v= REQUIRED. The fix treats a missing v= as a malformed
 // signature and PERMFAILs.
+//
+// checklist: DKIM-SIG-02
 func TestVerify_MissingVersionRejected(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1409,6 +1484,8 @@ func TestVerify_MissingVersionRejected(t *testing.T) {
 // equal "1". A signature declaring v=2 is an unsupported version and PERMFAILs.
 // This case was already caught by the version guard before issue #14; the test
 // guards that the missing-v fix does not regress it.
+//
+// checklist: DKIM-SIG-02
 func TestVerify_WrongVersionRejected(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1430,6 +1507,8 @@ func TestVerify_WrongVersionRejected(t *testing.T) {
 // with v=1 (through the same helper) must still verify, pinning that the §3.5 v=
 // enforcement rejects only the missing/wrong-version cases and leaves a
 // conformant signature untouched.
+//
+// checklist: DKIM-SIG-02
 func TestVerify_VersionOneVerifies(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1479,6 +1558,8 @@ func splitToSig(t *testing.T, raw []byte) (Header, []Header, string) {
 // the SAME signature PERMFAILs through VerifySignature because RFC 6376 §3.5 makes
 // v= a required DKIM policy tag. This is the seam that lets ARC reuse go-dkim's
 // crypto path without inheriting its DKIM policy.
+//
+// checklist: DKIM-VER-17
 func TestVerifySignatureBare_VersionlessSeam(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1502,6 +1583,8 @@ func TestVerifySignatureBare_VersionlessSeam(t *testing.T) {
 // 6376 §6.1.1) is DKIM POLICY, not mechanism: a cryptographically valid signature
 // whose i= domain is unaligned with d= verifies through the bare primitive but
 // PERMFAILs through VerifySignature.
+//
+// checklist: DKIM-VER-17
 func TestVerifySignatureBare_IgnoresIdentityAlignment(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1521,6 +1604,8 @@ func TestVerifySignatureBare_IgnoresIdentityAlignment(t *testing.T) {
 // (no-subdomain) and s= (service-type) flags (RFC 6376 §3.6.1) are DKIM POLICY,
 // not mechanism: a valid signature verifies through the bare primitive even when
 // those flags would make VerifySignature PERMFAIL.
+//
+// checklist: DKIM-VER-17
 func TestVerifySignatureBare_IgnoresKeyPolicyFlags(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1570,6 +1655,8 @@ func keyRecordWithFlags(t *testing.T, pubPEM, flags string) string {
 // makes the "s" flag forbid subdomaining: any signature's i= domain MUST equal
 // d= exactly. Before the fix the t= flag was never read, so the subdomain AUID
 // verified in defiance of the key's published policy. The fix PERMFAILs.
+//
+// checklist: DKIM-KEY-08
 func TestVerify_KeyTSFlagRejectsSubdomainIdentity(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1593,6 +1680,8 @@ func TestVerify_KeyTSFlagRejectsSubdomainIdentity(t *testing.T) {
 // over-reach. When the key sets t=s (in a list "y:s", to also exercise flag-list
 // parsing) but the signature's i= domain equals d= exactly — or i= is absent, so
 // its §3.5 default "@"+d equals d — verification still passes.
+//
+// checklist: DKIM-KEY-08
 func TestVerify_KeyTSFlagAllowsExactIdentity(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1623,6 +1712,8 @@ func TestVerify_KeyTSFlagAllowsExactIdentity(t *testing.T) {
 // TestVerify_NoTSFlagAllowsSubdomainIdentity guards the default: absent the t=s
 // flag, a subdomain AUID (i=user@sub.example.test) remains permitted per RFC
 // 6376 §3.6.1 — the fix must not narrow the default subdomain-allowed behavior.
+//
+// checklist: DKIM-KEY-08
 func TestVerify_NoTSFlagAllowsSubdomainIdentity(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1650,17 +1741,19 @@ func mustRecord(t *testing.T, pubPEM string) string {
 }
 
 // TestParseKeyFlags pins the flag-list parser directly: the "s" (no-subdomain)
-// flag is recognized alone, within a colon-separated list, in either case, with
-// surrounding folding whitespace ignored; unrecognized flags (e.g. "y") neither
+// flag is recognized alone and within a colon-separated list, case-sensitively
+// (RFC 6376 §3.2), with surrounding folding whitespace ignored; unrecognized flags (e.g. "y") neither
 // set it nor suppress a sibling "s".
+//
+// checklist: DKIM-TAG-03 DKIM-KEY-06 DKIM-KEY-08
 func TestParseKeyFlags(t *testing.T) {
-	set := []string{"s", "S", "y:s", "s:y", " y : s ", "s:x-future"}
+	set := []string{"s", "y:s", "s:y", " y : s ", "s:x-future"}
 	for _, tt := range set {
 		if !parseKeyFlags(tt).NoSubdomain {
 			t.Errorf("parseKeyFlags(%q).NoSubdomain = false, want true", tt)
 		}
 	}
-	unset := []string{"", "y", "y:x-future", "subdomain"}
+	unset := []string{"", "y", "y:x-future", "subdomain", "S"}
 	for _, tt := range unset {
 		if parseKeyFlags(tt).NoSubdomain {
 			t.Errorf("parseKeyFlags(%q).NoSubdomain = true, want false", tt)
@@ -1692,6 +1785,8 @@ func keyRecordWithService(t *testing.T, pubPEM, svcs string) string {
 // "email" or "*". Before the fix the s= tag was never read, so a key restricted
 // to tlsa still verified an email signature — the key was used for a service the
 // domain never authorized it for. The fix PERMFAILs.
+//
+// checklist: DKIM-KEY-05
 func TestVerify_KeyServiceTypeNotEmailRejected(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1718,6 +1813,8 @@ func TestVerify_KeyServiceTypeNotEmailRejected(t *testing.T) {
 // alongside an unrecognized service type that §3.6.1 says to ignore rather than
 // let veto the match — verification still passes. Absent s= (default "*") is
 // covered separately below.
+//
+// checklist: DKIM-KEY-05
 func TestVerify_KeyServiceTypeEmailVerifies(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	pubPEM := publicPEM(t, priv)
@@ -1742,13 +1839,14 @@ func TestVerify_KeyServiceTypeEmailVerifies(t *testing.T) {
 
 // TestKeyRecordAllowsService pins the s= list-matching helper directly: email is
 // permitted when the colon-separated list contains "email" or the wildcard "*",
-// matched case-insensitively with surrounding folding whitespace ignored, and an
+// matched case-sensitively (RFC 6376 §3.2) with surrounding folding whitespace ignored, and an
 // unrecognized service type must neither match nor suppress a sibling "email"/"*".
 // An empty list permits nothing.
+//
+// checklist: DKIM-TAG-03 DKIM-KEY-05
 func TestKeyRecordAllowsService(t *testing.T) {
 	allow := []struct{ sTag string }{
 		{"email"},
-		{"EMAIL"},
 		{"*"},
 		{"email:tlsa"},
 		{"tlsa:email"},
@@ -1766,6 +1864,7 @@ func TestKeyRecordAllowsService(t *testing.T) {
 		{"notemail"},
 		{"tlsa:x-unknown"},
 		{""},
+		{"EMAIL"},
 	}
 	for _, c := range deny {
 		if keyRecordAllowsService(c.sTag) {

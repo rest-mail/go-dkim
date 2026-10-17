@@ -9,9 +9,9 @@
 // Signing and verification both operate on the raw RFC 5322 message bytes —
 // never on a parsed or reconstructed representation — so a signature is checked
 // against exactly what was transmitted. Both "simple" and "relaxed" header and
-// body canonicalization are supported; signing uses rsa-sha256, and
-// verification additionally accepts the legacy rsa-sha1 algorithm. The package
-// depends only on the Go standard library.
+// body canonicalization are supported, with the rsa-sha256 and ed25519-sha256
+// algorithms (RFC 8301, RFC 8463); the historic rsa-sha1 is refused. The
+// package depends only on the Go standard library.
 //
 // # Signing
 //
@@ -24,6 +24,12 @@
 //		PrivateKey: key,
 //	})
 //	signed := append([]byte("DKIM-Signature: "+value+"\r\n"), raw...)
+//
+// By default Sign signs the header fields RFC 6376 §5.4.1 recommends
+// (DefaultSignedHeaders) and oversigns the ones a reader sees
+// (DefaultOversignedHeaders), so a From, To or Subject added after signing
+// breaks the signature. SignOptions.Headers and SignOptions.Oversign choose
+// others.
 //
 // GenerateKey, RecordName, RecordValue and RecordFragment produce a keypair and
 // render the public half as the DNS TXT record verifiers look up.
@@ -47,6 +53,7 @@
 package dkim
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -63,8 +70,12 @@ const DefaultSelector = "default"
 // GenerateKey creates an RSA DKIM keypair of the given size in bits and returns
 // both halves PEM-encoded. The private PEM is the signing key (pass it to
 // ParsePrivateKey); the public PEM feeds RecordValue to build the DNS record.
-// Use at least 2048 bits for production keys.
+// RFC 8301 §3.2 says signers SHOULD use at least 2048 bits, so a smaller size
+// is refused. The public exponent is 65537, as RFC 6376 §3.3.2 advises.
 func GenerateKey(bits int) (privatePEM, publicPEM string, err error) {
+	if bits < 2048 {
+		return "", "", fmt.Errorf("dkim: a %d-bit key is too small; RFC 8301 asks for at least 2048 bits", bits)
+	}
 	key, err := rsa.GenerateKey(rand.Reader, bits)
 	if err != nil {
 		return "", "", err
@@ -89,8 +100,10 @@ func RecordName(selector, domain string) string {
 	return selector + "._domainkey." + domain
 }
 
-// RecordValue renders the DKIM DNS TXT value (v=DKIM1; k=rsa; p=<base64 DER>)
-// from a PEM-encoded RSA public key (as produced by GenerateKey).
+// RecordValue renders the DKIM DNS TXT value from a PEM-encoded public key (a
+// SubjectPublicKeyInfo, as GenerateKey produces). For an RSA key it is
+// "v=DKIM1; k=rsa; p=<base64 DER>"; for an Ed25519 key, "v=DKIM1; k=ed25519;
+// p=<base64 of the 32-byte key>" (RFC 8463 §4.2).
 func RecordValue(publicKeyPEM string) (string, error) {
 	block, _ := pem.Decode([]byte(publicKeyPEM))
 	if block == nil {
@@ -100,11 +113,15 @@ func RecordValue(publicKeyPEM string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse public key: %w", err)
 	}
-	if _, ok := pub.(*rsa.PublicKey); !ok {
-		return "", fmt.Errorf("public key is not RSA")
+	switch k := pub.(type) {
+	case *rsa.PublicKey:
+		// block.Bytes is the DER SubjectPublicKeyInfo — exactly what p= carries.
+		return "v=DKIM1; k=rsa; p=" + base64.StdEncoding.EncodeToString(block.Bytes), nil
+	case ed25519.PublicKey:
+		return "v=DKIM1; k=ed25519; p=" + base64.StdEncoding.EncodeToString(k), nil
+	default:
+		return "", fmt.Errorf("public key is neither RSA nor Ed25519")
 	}
-	// block.Bytes is the DER SubjectPublicKeyInfo — exactly what p= carries.
-	return "v=DKIM1; k=rsa; p=" + base64.StdEncoding.EncodeToString(block.Bytes), nil
 }
 
 // RecordFragment renders a dnsmasq txt-record line for a DKIM record, splitting

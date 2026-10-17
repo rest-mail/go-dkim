@@ -25,12 +25,12 @@ func SplitMessage(raw []byte) ([]Header, string) {
 	s = strings.ReplaceAll(s, "\r", "\n")
 	s = strings.ReplaceAll(s, "\n", "\r\n")
 
-	var headerBlock string
-	body := ""
-	if idx := strings.Index(s, "\r\n\r\n"); idx >= 0 {
-		headerBlock = s[:idx]
-		body = s[idx+4:]
-	} else {
+	// A message that starts with an empty line has an empty header section.
+	if body, ok := strings.CutPrefix(s, "\r\n"); ok {
+		return nil, body
+	}
+	headerBlock, body, ok := strings.Cut(s, "\r\n\r\n")
+	if !ok {
 		headerBlock = strings.TrimSuffix(s, "\r\n")
 	}
 	return parseHeaders(headerBlock), body
@@ -38,18 +38,20 @@ func SplitMessage(raw []byte) ([]Header, string) {
 
 // parseHeaders splits a header block (fields joined by CRLF, no trailing CRLF)
 // into ordered header fields, folding continuation lines back into their field.
+// A line that is not a header field (no colon, or a name that is not an RFC
+// 5322 field-name) is skipped together with its continuation lines, so they
+// are not glued onto the field above.
 func parseHeaders(block string) []Header {
 	if block == "" {
 		return nil
 	}
 	var headers []Header
+	skipping := false
 	for _, line := range strings.Split(block, "\r\n") {
-		if line == "" {
-			continue
-		}
+		// No line is empty: the block ends at the first empty line.
 		if line[0] == ' ' || line[0] == '\t' {
 			// Continuation of the previous field.
-			if len(headers) == 0 {
+			if len(headers) == 0 || skipping {
 				continue
 			}
 			last := &headers[len(headers)-1]
@@ -57,15 +59,12 @@ func parseHeaders(block string) []Header {
 			last.Value += "\r\n" + line
 			continue
 		}
-		eq := strings.IndexByte(line, ':')
-		if eq < 0 {
+		name, value, ok := strings.Cut(line, ":")
+		name = strings.TrimRight(name, " \t")
+		if skipping = !ok || !validFieldName(name); skipping {
 			continue // not a valid header field
 		}
-		headers = append(headers, Header{
-			Name:  strings.TrimSpace(line[:eq]),
-			Value: line[eq+1:],
-			Raw:   line,
-		})
+		headers = append(headers, Header{Name: name, Value: value, Raw: line})
 	}
 	return headers
 }
@@ -186,8 +185,9 @@ func ParseTagList(s string) map[string]string {
 //     error (§6.1.1 cautions against being liberal in what is accepted). An
 //     empty segment — e.g. from the optional trailing ";" the ABNF allows, or
 //     surrounding folding whitespace — is ignored, not rejected.
-//   - A segment with an empty tag name ("=value") is malformed
-//     (tag-name = ALPHA *ALNUMPUNC) and is an error.
+//   - A tag name that is not ALPHA *ALNUMPUNC (an empty one, say), or a value
+//     with a character outside VALCHAR and folding whitespace, is malformed and
+//     is an error.
 //
 // On any violation it returns a nil map and an error, so a caller verifying a
 // DKIM-Signature or a DNS key record can PERMFAIL (or skip the record) rather
@@ -203,15 +203,47 @@ func ParseTagListStrict(s string) (map[string]string, error) {
 			return nil, fmt.Errorf("malformed tag-list segment %q (missing '=')", strings.TrimSpace(seg))
 		}
 		key := strings.TrimSpace(seg[:eq])
-		if key == "" {
-			return nil, fmt.Errorf("malformed tag-list segment (empty tag name)")
+		if !validTagName(key) {
+			return nil, fmt.Errorf("malformed tag name %q in tag-list", key)
 		}
 		if _, dup := out[key]; dup {
 			return nil, fmt.Errorf("duplicate tag %q in tag-list", key)
 		}
-		out[key] = strings.TrimSpace(seg[eq+1:])
+		val := strings.TrimSpace(seg[eq+1:])
+		if !validTagValue(val) {
+			return nil, fmt.Errorf("malformed value for tag %q in tag-list", key)
+		}
+		out[key] = val
 	}
 	return out, nil
+}
+
+// validTagName reports whether name matches the RFC 6376 §3.2 tag-name ABNF,
+// ALPHA *ALNUMPUNC, where ALNUMPUNC is a letter, a digit or "_".
+func validTagName(name string) bool {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !isAlpha(c) && (i == 0 || !isDigit(c) && c != '_') {
+			return false
+		}
+	}
+	return name != ""
+}
+
+func isAlpha(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// validTagValue reports whether a trimmed tag value holds only the RFC 6376
+// §3.2 tag-value characters: VALCHAR (printable US-ASCII except ";") and the
+// whitespace of FWS between them.
+func validTagValue(val string) bool {
+	for i := 0; i < len(val); i++ {
+		c := val[i]
+		if (c < 0x21 || c > 0x7e) && c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+			return false
+		}
+	}
+	return true
 }
 
 // RemoveBValue blanks the value of the b= tag in a signature field (a
@@ -233,7 +265,9 @@ func RemoveBValue(field string) string {
 			i = i + j + 1
 			hasDelim = true
 		}
-		if eq := strings.IndexByte(seg, '='); eq >= 0 && strings.EqualFold(strings.TrimSpace(seg[:eq]), "b") {
+		// Tag names are case-sensitive (RFC 6376 §3.2): "B=" is an unknown tag,
+		// hashed as it is, not the signature.
+		if eq := strings.IndexByte(seg, '='); eq >= 0 && strings.TrimSpace(seg[:eq]) == "b" {
 			b.WriteString(seg[:eq+1]) // keep "b=", drop the value
 		} else {
 			b.WriteString(seg)
@@ -277,12 +311,8 @@ func bytesEqual(a, b []byte) bool { return bytes.Equal(a, b) }
 // negative l= would parse cleanly and then slice the body with a negative bound
 // (canonBody[:-1]), panicking — a remotely triggerable crash since the
 // signature header is attacker-controlled. strconv.Atoi still rejects values
-// that overflow int.
+// that overflow int, and an empty value.
 func parseUint(s string) (int, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, strconv.ErrSyntax
-	}
 	for i := 0; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
 			return 0, strconv.ErrSyntax

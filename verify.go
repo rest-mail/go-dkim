@@ -3,6 +3,7 @@ package dkim
 import (
 	"context"
 	"crypto"
+	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
@@ -143,11 +144,12 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	// signing domain (d=). An unaligned i= lets a signature valid for one domain
 	// assert an identity in an arbitrary domain, misleading any assessor that
 	// reads i= to attribute responsibility — so it is a PERMFAIL (domain
-	// mismatch). When i= is absent its default is "@"+d (§3.5), trivially
-	// aligned, so no check is needed.
+	// mismatch). Its domain, like d=, must be in A-label form (§3.5). When i= is
+	// absent its default is "@"+d (§3.5), trivially aligned, so no check is
+	// needed.
 	if iTag := tags["i"]; iTag != "" {
 		idomain, ok := identityDomain(iTag)
-		if !ok || !domainAligned(idomain, tags["d"]) {
+		if !ok || !validDNSName(idomain) || !domainAligned(idomain, tags["d"]) {
 			return permfail(fmt.Sprintf("i= domain %q not aligned with d= domain %q", idomain, tags["d"]))
 		}
 	}
@@ -286,19 +288,39 @@ func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, al
 		}
 	}
 
-	// Algorithm → hash. hashAlg is the hash half of the a= tag ("sha256" /
-	// "sha1"), threaded into key evaluation so the key record's h= tag (the hash
-	// algorithms the domain permits with that key) can be enforced (RFC 6376
-	// §3.6.1 / §6.1.2).
-	var hashType crypto.Hash
-	var hashAlg string
-	switch strings.ToLower(tags["a"]) {
+	// Algorithm (RFC 6376 §3.3, RFC 8301 §3.1, RFC 8463 §4.1). The key type is
+	// threaded into key selection, which must find a key record of the same
+	// type, and hashAlg into the key record's h= check (RFC 6376 §3.6.1 /
+	// §6.1.2). Tag values are case-sensitive (§3.2), so "RSA-SHA256" is not
+	// recognized. rsa-sha1 is historic: RFC 8301 forbids verifying with it.
+	var keyType string
+	const hashType, hashAlg = crypto.SHA256, "sha256"
+	switch tags["a"] {
 	case "rsa-sha256":
-		hashType, hashAlg = crypto.SHA256, "sha256"
+		keyType = "rsa"
+	case "ed25519-sha256":
+		keyType = "ed25519"
 	case "rsa-sha1":
-		hashType, hashAlg = crypto.SHA1, "sha1"
+		return permfail("rsa-sha1 is historic and no longer verified (RFC 8301)")
 	default:
 		return permfail("unsupported algorithm " + tags["a"])
+	}
+
+	// Signing domain and selector (RFC 6376 §3.5): DNS names, internationalized
+	// ones as A-labels. Anything else cannot name a key record, and is not sent
+	// to the resolver.
+	if !validDNSName(tags["d"]) {
+		return permfail("d= is not a DNS name in A-label form")
+	}
+	if !validDNSName(tags["s"]) {
+		return permfail("s= is not a DNS name in A-label form")
+	}
+
+	// Query method (RFC 6376 §3.5): q= defaults to dns/txt, the only defined
+	// method. Unrecognized methods are ignored, so a q= listing no dns/txt
+	// leaves no way to fetch the key.
+	if q, ok := tags["q"]; ok && !listContains(q, "dns/txt") {
+		return permfail("no supported key query method in q=" + q)
 	}
 
 	// Canonicalization: c=header/body, default simple/simple.
@@ -350,20 +372,19 @@ func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, al
 	}
 
 	// ── Public key via DNS ───────────────────────────────────────────
-	pub, flags, kres := FetchKey(ctx, tags["s"], tags["d"], hashAlg, resolver)
+	pub, flags, kres := fetchKey(ctx, tags["s"], tags["d"], keyType, hashAlg, resolver)
 	if kres != "" {
 		res.Result = kres
-		res.Reason = "key lookup: " + res.Reason
 		if kres == ResultTempError {
 			res.Reason = "temporary DNS failure for " + RecordName(tags["s"], tags["d"])
 		} else {
-			res.Reason = "no valid key at " + RecordName(tags["s"], tags["d"])
+			res.Reason = "no valid " + keyType + " key at " + RecordName(tags["s"], tags["d"])
 		}
 		return res, KeyFlags{}
 	}
 
 	hashed := HashBytes(hashType, []byte(signedData))
-	if err := rsa.VerifyPKCS1v15(pub, hashType, hashed, sigBytes); err != nil {
+	if !verifyHash(pub, hashed, sigBytes) {
 		res.Result = ResultFail
 		res.Reason = "signature verification failed"
 		return res, KeyFlags{}
@@ -435,29 +456,38 @@ type KeyFlags struct {
 
 // parseKeyFlags reads a DKIM key record's t= tag — a colon-separated list of
 // flags, RFC 6376 §3.6.1, e.g. "y:s" — into a KeyFlags. Flag names are matched
-// case-insensitively with the folding whitespace the ABNF permits around each
-// ":" ignored; unrecognized flags (e.g. "y", testing mode, which the verifier
+// case-sensitively (§3.2) with the folding whitespace the ABNF permits around
+// each ":" ignored; unrecognized flags (e.g. "y", testing mode, which the verifier
 // does not act on here) are ignored per §3.6.1.
 func parseKeyFlags(tTag string) KeyFlags {
 	var f KeyFlags
-	for _, flag := range strings.Split(tTag, ":") {
-		if strings.EqualFold(strings.TrimSpace(flag), "s") {
-			f.NoSubdomain = true
-		}
-	}
+	f.NoSubdomain = listContains(tTag, "s")
 	return f
 }
 
 // FetchKey resolves and parses a signer's RSA public key from its DKIM key
-// record at <selector>._domainkey.<domain>. hashAlg is the hash half of the
-// verifying signature's a= tag ("sha256" / "sha1"); a key record whose h= tag
-// is present but does not list hashAlg is ignored (RFC 6376 §3.6.1 / §6.1.2).
-// On success it returns (key, flags, "") where flags carries the selected key
-// record's policy tags (the t= flags, §3.6.1) for the caller to enforce against
-// the signature; on failure it returns (nil, KeyFlags{}, result) where result is
-// ResultTempError (transient DNS failure) or ResultPermError (missing, revoked,
-// malformed, or hash-algorithm-disallowed key).
+// record at <selector>._domainkey.<domain>, for an rsa-sha256 signature such as
+// an ARC-Seal. hashAlg is the hash half of the verifying signature's a= tag
+// ("sha256"); a key record whose h= tag is present but does not list hashAlg is
+// ignored (RFC 6376 §3.6.1 / §6.1.2), as is one whose key is not RSA or is
+// shorter than 1024 bits (RFC 8301 §3.2). On success it returns (key, flags,
+// "") where flags carries the selected key record's policy tags (the t= flags,
+// §3.6.1) for the caller to enforce against the signature; on failure it
+// returns (nil, KeyFlags{}, result) where result is ResultTempError (transient
+// DNS failure) or ResultPermError (missing, revoked, malformed, or
+// hash-algorithm-disallowed key).
 func FetchKey(ctx context.Context, selector, domain, hashAlg string, resolver TXTResolver) (*rsa.PublicKey, KeyFlags, string) {
+	pub, flags, res := fetchKey(ctx, selector, domain, "rsa", hashAlg, resolver)
+	if res != "" {
+		return nil, flags, res
+	}
+	return pub.(*rsa.PublicKey), flags, ""
+}
+
+// fetchKey resolves the key record at <selector>._domainkey.<domain> and
+// returns the first usable key of keyType ("rsa" or "ed25519"): an
+// *rsa.PublicKey of at least 1024 bits or an ed25519.PublicKey.
+func fetchKey(ctx context.Context, selector, domain, keyType, hashAlg string, resolver TXTResolver) (crypto.PublicKey, KeyFlags, string) {
 	name := RecordName(selector, domain)
 	records, err := resolver(ctx, name)
 	if err != nil {
@@ -503,31 +533,72 @@ func FetchKey(ctx context.Context, selector, domain, hashAlg string, resolver TX
 		if kt["p"] == "" {
 			continue // revoked or malformed
 		}
-		if k := kt["k"]; k != "" && !strings.EqualFold(k, "rsa") {
+		// k= defaults to "rsa" (§3.6.1). A key of another type than the
+		// signature's a= names is not suitable for it (§6.1.2), and an
+		// unrecognized type is ignored; either way the record is skipped.
+		k, ok := kt["k"]
+		if !ok {
+			k = "rsa"
+		}
+		if k != keyType {
 			continue
 		}
 		der, derr := decodeBase64Tag(kt["p"])
 		if derr != nil {
 			continue
 		}
-		pub, perr := x509.ParsePKIXPublicKey(der)
-		if perr != nil {
+		pub := parsePublicKey(k, der)
+		if pub == nil {
 			continue
 		}
-		if rsaKey, ok := pub.(*rsa.PublicKey); ok {
-			flags := parseKeyFlags(kt["t"])
-			// RFC 6376 §3.6.1: the key record's s= tag, when present, lists the
-			// service types this key may be used for (default "*", all services). A
-			// list naming neither "email" nor the wildcard "*" bars the key from
-			// verifying an email signature; record that so VerifySignature PERMFAILs.
-			// Absent s= leaves the default (all services), so the key stays usable.
-			if s, ok := kt["s"]; ok && !keyRecordAllowsService(s) {
-				flags.NotForEmail = true
-			}
-			return rsaKey, flags, ""
+		flags := parseKeyFlags(kt["t"])
+		// RFC 6376 §3.6.1: the key record's s= tag, when present, lists the
+		// service types this key may be used for (default "*", all services). A
+		// list naming neither "email" nor the wildcard "*" bars the key from
+		// verifying an email signature; record that so VerifySignature PERMFAILs.
+		// Absent s= leaves the default (all services), so the key stays usable.
+		if s, ok := kt["s"]; ok && !keyRecordAllowsService(s) {
+			flags.NotForEmail = true
 		}
+		return pub, flags, ""
 	}
 	return nil, KeyFlags{}, ResultPermError
+}
+
+// parsePublicKey decodes the p= data of a key record of type k, or returns nil
+// when it is not a usable key of that type.
+//
+// For "rsa", RFC 6376 §3.6.1 names an RSAPublicKey, but its own example
+// (Appendix C) and nearly every published record carry a SubjectPublicKeyInfo,
+// so both are accepted. A key shorter than 1024 bits is not usable (RFC 8301
+// §3.2). For "ed25519", p= is the raw 32-byte public key (RFC 8463 §4.2).
+func parsePublicKey(k string, der []byte) crypto.PublicKey {
+	if k == "ed25519" {
+		if len(der) != ed25519.PublicKeySize {
+			return nil
+		}
+		return ed25519.PublicKey(der)
+	}
+	var key *rsa.PublicKey
+	if pub, err := x509.ParsePKIXPublicKey(der); err == nil {
+		key, _ = pub.(*rsa.PublicKey)
+	} else if pub, err := x509.ParsePKCS1PublicKey(der); err == nil {
+		key = pub
+	}
+	if key == nil || key.N.BitLen() < minRSABits {
+		return nil
+	}
+	return key
+}
+
+// verifyHash checks sig over the SHA-256 hash of the signed data with pub, an
+// RSA key (PKCS#1 v1.5, RFC 6376 §3.3.2) or an Ed25519 key (PureEdDSA over the
+// hash, RFC 8463 §3).
+func verifyHash(pub crypto.PublicKey, hashed, sig []byte) bool {
+	if k, ok := pub.(ed25519.PublicKey); ok {
+		return ed25519.Verify(k, hashed, sig)
+	}
+	return rsa.VerifyPKCS1v15(pub.(*rsa.PublicKey), crypto.SHA256, hashed, sig) == nil
 }
 
 // firstTagName returns the name of the first tag in a DKIM tag-list record (the
@@ -552,16 +623,23 @@ func firstTagName(rec string) string {
 
 // keyRecordAllowsHash reports whether a DKIM key record's h= tag value (hTag) —
 // a colon-separated list of acceptable hash algorithm names, RFC 6376 §3.6.1 —
-// permits the hash algorithm named hashAlg ("sha1" or "sha256", the hash half
-// of the signature's a= tag). Names are matched case-insensitively with the
+// permits the hash algorithm named hashAlg ("sha256", the hash half of the
+// signature's a= tag). Names are matched case-sensitively (§3.2) with the
 // folding whitespace §3.6.1 allows around each ":" ignored; an unrecognized
 // name in the list simply does not match (§3.6.1: "Unrecognized algorithms MUST
 // be ignored"). It reports only list membership: whether the h= tag is present
 // at all (absent = no restriction) is the caller's decision, so an empty hTag —
 // a list with no members — returns false here.
 func keyRecordAllowsHash(hTag, hashAlg string) bool {
-	for _, alg := range strings.Split(hTag, ":") {
-		if strings.EqualFold(strings.TrimSpace(alg), hashAlg) {
+	return listContains(hTag, hashAlg)
+}
+
+// listContains reports whether the colon-separated tag value list has an
+// element equal to want, ignoring the folding whitespace allowed around each
+// ":". Values are case-sensitive (RFC 6376 §3.2).
+func listContains(list, want string) bool {
+	for _, v := range strings.Split(list, ":") {
+		if strings.TrimSpace(v) == want {
 			return true
 		}
 	}
@@ -571,21 +649,15 @@ func keyRecordAllowsHash(hTag, hashAlg string) bool {
 // keyRecordAllowsService reports whether a DKIM key record's s= tag value (sTag)
 // — a colon-separated list of the service types the key may be used for, RFC 6376
 // §3.6.1 — permits the "email" service: the list contains either "email" or the
-// wildcard "*". Names are matched case-insensitively with the folding whitespace
-// §3.6.1 allows around each ":" ignored; any other service type in the list is
+// wildcard "*". Names are matched case-sensitively (§3.2) with the folding
+// whitespace §3.6.1 allows around each ":" ignored; any other service type in the list is
 // simply not a match (§3.6.1: unrecognized service types are ignored, not an
 // error), so a list like "email:tlsa" permits email on the strength of its
 // "email" entry. It reports only list membership: whether the s= tag is present
 // at all (absent = default "*", all services) is the caller's decision, so an
 // empty sTag — a list with no members — returns false here.
 func keyRecordAllowsService(sTag string) bool {
-	for _, svc := range strings.Split(sTag, ":") {
-		switch strings.ToLower(strings.TrimSpace(svc)) {
-		case "email", "*":
-			return true
-		}
-	}
-	return false
+	return listContains(sTag, "email") || listContains(sTag, "*")
 }
 
 // BuildSignedHeaders assembles the canonicalized header block that a signature's
@@ -618,7 +690,11 @@ func BuildSignedHeaders(hTag string, allHeaders []Header, sig Header, canon stri
 	// The signature header being verified, b= emptied, no trailing CRLF.
 	stripped := sig
 	stripped.Value = RemoveBValue(sig.Value)
-	stripped.Raw = RemoveBValue(sig.Raw)
+	// The raw field is name, colon, value; blank b= in the value only, so a b=
+	// that is the first tag is found even though the name precedes it.
+	if colon := strings.IndexByte(sig.Raw, ':'); colon >= 0 {
+		stripped.Raw = sig.Raw[:colon+1] + RemoveBValue(sig.Raw[colon+1:])
+	}
 	b.WriteString(CanonicalizeHeader(stripped, canon))
 	return b.String()
 }

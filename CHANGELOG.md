@@ -6,6 +6,99 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+The API stays compatible where that cost nothing: `SignOptions` keeps its
+fields, `PrivateKey` widened to a `crypto.Signer` (which an `*rsa.PrivateKey`
+still is), `FetchKey` keeps its signature and still returns an RSA key (what
+ARC's seal needs), and `ParsePrivateKey` still returns an `*rsa.PrivateKey`.
+Everything else is a clean break, listed below; the module is v0.x and its
+users are REST Mail's server and go-arc.
+(rest-mail/rest-mail-server#374, rest-mail/rest-mail-server#128)
+
+### BREAKING CHANGES
+
+- `SignOptions.PrivateKey` is a `crypto.Signer`. Existing code that assigns an
+  `*rsa.PrivateKey` compiles unchanged.
+- `Sign` signs the RFC 6376 §5.4.1 header set by default and **oversigns**
+  From, To, Cc, Subject, Reply-To, Date, Message-ID, Content-Type and
+  MIME-Version (see Added), so default signatures have a longer `h=` and break
+  when one of those fields is added after signing.
+- `SignOptions.Headers` signs every instance of a named field the message
+  carries, not only the last one. Setting `Headers` without `Oversign`
+  oversigns nothing.
+- The value `Sign` returns is folded: it contains CRLF followed by a space
+  wherever a line would pass 78 characters. Prepend `DKIM-Signature: ` exactly
+  (with one space), as before.
+- `rsa-sha1` signatures are a `permerror` (RFC 8301 §3.1), and an RSA key under
+  1024 bits is unusable: `Sign` refuses it and a verifier treats its key record
+  as unusable, a `permerror` (RFC 8301 §3.2).
+- `GenerateKey` refuses sizes under 2048 bits (RFC 8301 §3.2 SHOULD).
+- `Sign` refuses a `Domain` or `Selector` that is not an A-label DNS name, a
+  header name that is not an RFC 5322 field name, and a canonicalization other
+  than `simple` or `relaxed`.
+- Tag values are case-sensitive, as RFC 6376 §3.2 requires: `a=RSA-SHA256`,
+  `c=Relaxed`, and key record values such as `k=RSA`, `h=SHA256`, `s=EMAIL` or
+  `t=S` are no longer read as their lower-case forms.
+- `ParseTagListStrict` also rejects a tag name that is not `ALPHA *ALNUMPUNC`
+  (`x-foo=1`, say) and a value with a character outside VALCHAR and folding
+  whitespace.
+
+### Added
+
+- Ed25519 (RFC 8463): `Sign` signs with `ed25519-sha256` given an
+  `ed25519.PrivateKey`, verification accepts `ed25519-sha256` against a
+  `k=ed25519` key record, and `RecordValue` renders an Ed25519 public key's
+  record.
+- Oversigning: `SignOptions.Oversign` names fields signed once more than they
+  appear (RFC 6376 §5.4.2), so a copy added after signing breaks the
+  signature; a name the message lacks is signed as absent.
+  `DefaultSignedHeaders` and `DefaultOversignedHeaders` are the defaults.
+- `CHECKLIST.md`, which maps every signer and verifier requirement of RFC 6376,
+  RFC 8301 and RFC 8463 to its tests (109 items: 95 tested, 14 not applicable
+  with a reason), and `internal/checklist`, copied from go-spf, which checks
+  the two agree in CI.
+- A CI gate at 95% statement coverage (99.6% now), with `COVERAGE.md` listing
+  what is left uncovered and why.
+- Five fuzz targets, each run for 30 seconds in CI: tag-lists, the
+  DKIM-Signature field, key records, canonicalization properties, and
+  sign-then-verify of any message.
+- Tests from the RFCs: RFC 8463 Appendix A (both signatures verify against its
+  keys, and its oversigning holds), and the body hash and key record of RFC
+  6376 Appendix A and C.
+- Differential tests against `github.com/emersion/go-msgauth/dkim` (MIT, a
+  test-only dependency): messages signed by either verify with the other, in
+  all four canonicalizations, with RSA and Ed25519 keys.
+
+### Fixed
+
+Found by writing the checklist and by fuzzing:
+
+- `rsa-sha1` signatures were verified; RFC 8301 forbids it.
+- A key record holding an RSA key under 1024 bits was not refused.
+- The signature field was one unfolded line; with a 4096-bit key and the
+  wider header set it passed RFC 5322's 998-character line limit.
+- Under simple header canonicalization, a signature whose first tag is `b=`
+  had its `b=` value hashed rather than emptied, so valid signatures from
+  signers that put `b=` first failed.
+- `RemoveBValue` also emptied a `B=` tag, which is an unknown tag that must be
+  hashed as it is (tag names are case-sensitive).
+- `a=` and the key record's `k=`, `h=`, `s=` and `t=` values were compared
+  without regard to case (RFC 6376 §3.2).
+- `q=` was ignored: a signature naming only unknown key query methods was
+  verified through DNS anyway. It is now a `permerror`.
+- `d=`, `s=` and `i=` were not checked: a U-label or a name with whitespace
+  was sent to the resolver, and a U-label `i=` under `d=` passed the alignment
+  check.
+- A key record whose `p=` is an RSAPublicKey, the form RFC 6376 §3.6.1 names,
+  was rejected; only SubjectPublicKeyInfo was read. Both are read now.
+- `ParseTagListStrict` accepted tag names and values outside the §3.2 ABNF.
+- A header line with a field name holding whitespace was read as a field, and
+  the continuation lines of a line that is not a field were glued onto the
+  field above (found by `FuzzCanonicalization`).
+- A message starting with an empty line had its body read as header fields.
+- `Sign` accepted an unknown canonicalization name: it declared it in `c=` and
+  hashed with simple, making a signature no verifier accepts.
+- `SignOptions.Headers` signed only the last instance of a repeated field.
+
 ## [0.2.1] - 2026-07-25
 
 ### Added

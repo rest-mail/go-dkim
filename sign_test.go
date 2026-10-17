@@ -24,6 +24,7 @@ func buildRaw(body string) string {
 	}, "\r\n")
 }
 
+// checklist: DKIM-CANON-01 DKIM-SIGN-11
 func TestSign_VerifyRoundTrip(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 1024)
 	if err != nil {
@@ -57,6 +58,7 @@ func TestSign_VerifyRoundTrip(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-VER-11
 func TestSign_TamperFails(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	resolver := testKeyResolver(t, publicPEM(t, priv), "default", "example.test")
@@ -75,6 +77,7 @@ func TestSign_TamperFails(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-SIGN-03
 func TestSign_RequiresFrom(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	raw := buildRaw("body\r\n")
@@ -107,6 +110,7 @@ func TestSign_RequiresFrom(t *testing.T) {
 	}
 }
 
+// checklist: DKIM-SIGN-15
 func TestSign_OnlySignsPresentHeaders(t *testing.T) {
 	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
 	// Request signing Cc (absent) — it must be omitted from h=, and still verify.
