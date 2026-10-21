@@ -4,6 +4,13 @@ All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html); releases are Go
 module tags of the form `vMAJOR.MINOR.PATCH`.
 
+## [Unreleased]
+
+### Added
+
+- README coverage-gate and RFC checklist badges, checked in CI against the
+  pinned coverage gate and the checklist's validated test mappings.
+
 ## [0.3.1] - 2026-10-17
 
 ### Fixed

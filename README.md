@@ -1,6 +1,8 @@
 # go-dkim
 
 [![CI](https://github.com/rest-mail/go-dkim/actions/workflows/ci.yml/badge.svg)](https://github.com/rest-mail/go-dkim/actions/workflows/ci.yml)
+[![Coverage gate: ≥95%](https://img.shields.io/badge/coverage%20gate-%E2%89%A595%25-brightgreen)](COVERAGE.md)
+[![Checklist: 96/110 mapped](https://img.shields.io/badge/checklist-96%2F110%20mapped-blue)](CHECKLIST.md)
 [![Go Reference](https://pkg.go.dev/badge/github.com/rest-mail/go-dkim.svg)](https://pkg.go.dev/github.com/rest-mail/go-dkim)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rest-mail/go-dkim)](https://goreportcard.com/report/github.com/rest-mail/go-dkim)
 
@@ -210,8 +212,15 @@ CI runs these through go-spf's reusable
 pinned to that commit; the required `Build & Test` check passes only when it
 and the workflow fixtures in [`.github/tests`](.github/tests) both succeed.
 CI also fails below 95% statement coverage; the lines left uncovered on
-purpose are listed, each with a reason, in [COVERAGE.md](COVERAGE.md). The fuzz
-targets are `FuzzParseTagList` (tag-lists), `FuzzSignatureHeader` (verifying
+purpose are listed, each with a reason, in [COVERAGE.md](COVERAGE.md). The
+coverage badge states this enforced minimum; the measured percentage is in
+each CI run's `RFC proof` log. The checklist badge counts requirements mapped
+to tests over all requirements, including the 14 `n/a` rows, each with its
+reason, in the total. CI validates the mappings and rejects a stale badge
+count. These badges describe the checked-in contract; the CI badge shows
+whether verification passed.
+
+The fuzz targets are `FuzzParseTagList` (tag-lists), `FuzzSignatureHeader` (verifying
 any DKIM-Signature field), `FuzzKeyRecord` (key records), `FuzzCanonicalization`
 (properties such as relaxed canonicalization being idempotent) and
 `FuzzSignVerify` (anything signed verifies); CI runs each for 30 seconds. Their
