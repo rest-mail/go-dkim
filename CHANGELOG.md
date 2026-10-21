@@ -10,6 +10,10 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
 
 - README coverage-gate and RFC checklist badges, checked in CI against the
   pinned coverage gate and the checklist's validated test mappings.
+- Tests for three checklist rows that were n/a: Sign gives every message the
+  same AUID and emits no expiry (DKIM-SIGN-18, DKIM-SIGN-19), and it hashes
+  the body before SMTP dot-stuffing (DKIM-SIGN-21). The checklist now maps
+  99 of 110 requirements.
 
 ## [0.3.1] - 2026-10-17
 

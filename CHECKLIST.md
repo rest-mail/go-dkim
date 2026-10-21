@@ -104,10 +104,10 @@ say) says "n/a" and why. CI checks this file against the tests with
 | DKIM-SIGN-15 | 5.4 | MAY | Sign other fields present at the time of signing, named by the caller; a named field the message lacks is left out unless oversigned. | `TestSign_OnlySignsPresentHeaders`, `TestOversigning` |
 | DKIM-SIGN-16 | 3.5 | MUST | d= and s= are DNS names, internationalized ones as A-labels. | `TestSignRejectsBadOptions` |
 | DKIM-SIGN-17 | 4.2 | SHOULD NOT | Remove existing DKIM-Signature fields when signing. | `TestSignDoesNotChangeMessage` |
-| DKIM-SIGN-18 | 3.5 | SHOULD | Use the same AUID (i=) for each message intended to be evaluated as one. | n/a: Sign emits no i=, so the AUID is always the default "@" + d=. |
-| DKIM-SIGN-19 | 3.5 | MUST | x= is greater than t=. | n/a: Sign emits no x=. |
+| DKIM-SIGN-18 | 3.5 | SHOULD | Use the same AUID (i=) for each message intended to be evaluated as one. | `TestSignAUIDAndExpiry` |
+| DKIM-SIGN-19 | 3.5 | MUST | x= is greater than t=. | `TestSignAUIDAndExpiry` |
 | DKIM-SIGN-20 | 5.3 | SHOULD | Convert the message to a transfer encoding that survives transit (quoted-printable or base64) before signing. | n/a: the caller builds the MIME message; the library signs the bytes it is given. |
-| DKIM-SIGN-21 | 3.7 | MUST | Hash the body after content-transfer encoding and before transport-level encoding (dot-stuffing). | n/a: the caller passes the message as it goes into DATA, encoded and not dot-stuffed; the library hashes those bytes. |
+| DKIM-SIGN-21 | 3.7 | MUST | Hash the body after content-transfer encoding and before transport-level encoding (dot-stuffing). | `TestSignHashesBodyBeforeDotStuffing` |
 | DKIM-SIGN-22 | 5.4.1 | SHOULD | Choose the canonicalization by the kind of mail sent. | n/a: the caller's choice, through HeaderCanon and BodyCanon (relaxed by default). |
 | DKIM-SIGN-23 | 5.5 | SHOULD | An intermediary that modifies a message checks its signatures and makes sure its changes do not break them. | n/a: the library does not modify messages. |
 
