@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/rest-mail/go-dkim/actions/workflows/ci.yml/badge.svg)](https://github.com/rest-mail/go-dkim/actions/workflows/ci.yml)
 [![Coverage gate: ≥95%](https://img.shields.io/badge/coverage%20gate-%E2%89%A595%25-brightgreen)](COVERAGE.md)
-[![Checklist: 106/129 mapped](https://img.shields.io/badge/checklist-106%2F129%20mapped-blue)](CHECKLIST.md)
+[![Checklist: 110/134 mapped](https://img.shields.io/badge/checklist-110%2F134%20mapped-blue)](CHECKLIST.md)
 [![Go Reference](https://pkg.go.dev/badge/github.com/rest-mail/go-dkim.svg)](https://pkg.go.dev/github.com/rest-mail/go-dkim)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rest-mail/go-dkim)](https://goreportcard.com/report/github.com/rest-mail/go-dkim)
 
@@ -199,9 +199,12 @@ simplest secure option:
   one is used.
 - **An RSA `p=`** may be the RSAPublicKey RFC 6376 §3.6.1 names or the
   SubjectPublicKeyInfo its Appendix C (and nearly every publisher) uses.
-- **`d=`, `s=` and the domain of `i=`** must be dot-separated labels of 1 to 63
-  letters, digits, hyphens or underscores; anything else (a U-label, say) is a
-  `permerror` and no DNS query is sent.
+- **`d=`, `s=` and the domain of `i=`** may be U-labels (RFC 8616 §5); they
+  are converted to A-labels (lower-cased, punycode; not the full IDNA2008
+  mapping) before any check or DNS query, and the result reports them so.
+  After that they must be dot-separated labels of 1 to 63 letters, digits,
+  hyphens or underscores; anything else (invalid UTF-8, say) is a `permerror`
+  and no DNS query is sent.
 - **A line in the header that is not a header field** (no colon, or a name
   with whitespace in it) is skipped together with its continuation lines.
 

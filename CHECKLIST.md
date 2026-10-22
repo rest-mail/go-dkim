@@ -3,7 +3,8 @@
 Inventory of the requirements [RFC 6376](https://www.rfc-editor.org/rfc/rfc6376)
 places on a DKIM signer and verifier, as updated by
 [RFC 8301](https://www.rfc-editor.org/rfc/rfc8301) (algorithms and key sizes) and
-[RFC 8463](https://www.rfc-editor.org/rfc/rfc8463) (Ed25519), with the tests that
+[RFC 8463](https://www.rfc-editor.org/rfc/rfc8463) (Ed25519) and
+[RFC 8616](https://www.rfc-editor.org/rfc/rfc8616) §5 (internationalized mail), with the tests that
 cover them. This records MUST, MUST NOT, SHOULD, SHOULD NOT, RECOMMENDED and
 NOT RECOMMENDED clauses, implemented MAYs, and normative behaviour without a
 keyword (level "Normative"). DNS-publisher and receiver-policy duties are
@@ -42,6 +43,7 @@ claim that arbitrary input has been proved conformant to every imported ABNF.
 | RFC 6376 §§8–8.15 | Existing KEY-14, VER-16 and SIGN-14 cover the uppercase requirements; other security advice informs caller policy. |
 | RFC 6376 §9, Appendices A–F | References/examples/change history; existing RFC examples and retired g= row KEY-18; no additional signer/verifier MUST/SHOULD clauses. |
 | RFC 8301 §§1–6 | All algorithm/key-size changes already in ALG-01–09/15; no extra clause found. |
+| RFC 8616 §5 | Added EAI-01–05: U-labels and UTF-8 in d=, s= and i=, A-label key lookup, header-form hash; the signer recommendation is n/a. |
 | RFC 8463 §§1–9, Appendix A | All algorithm/key syntax/implementation clauses already in ALG-10–14 and KEY-17; published dual-signature vector remains TestRFC8463Example. |
 
 The configurable required-signed-header list (VER-08) remains an owner decision;
@@ -105,7 +107,7 @@ duties below remain explicit limitations, not implied implementation claims.
 | DKIM-SIG-02 | 3.5, 6.1.1 | MUST | v= is required and is 1; any other version is PERMFAIL (incompatible version). | `TestVerify_MissingVersionRejected`, `TestVerify_WrongVersionRejected`, `TestVerify_VersionOneVerifies` |
 | DKIM-SIG-03 | 3.5, 6.1.1 | MUST | A signature missing a required tag (a=, b=, bh=, d=, h=, s=) is PERMFAIL. | `TestRequiredTags` |
 | DKIM-SIG-04 | 3.5 | MUST | Ignore whitespace in b= and bh= when decoding them. | `TestDecodeBase64Tag`, `TestVerify_UnpaddedBase64Accepted` |
-| DKIM-SIG-05 | 3.5 | MUST | d=, s= and the domain of i= are DNS names, internationalized ones as A-labels; otherwise the signature is invalid. | `TestDomainSelectorSyntax`, `TestIdentitySyntax`, `TestSignRejectsBadOptions` |
+| DKIM-SIG-05 | 3.5; RFC 8616 5 | MUST | d=, s= and the domain of i= are DNS names, internationalized ones as A-labels (or U-labels, EAI-01); otherwise the signature is invalid. | `TestDomainSelectorSyntax`, `TestIdentitySyntax`, `TestSignRejectsBadOptions` |
 | DKIM-SIG-06 | 3.5 | MUST | h= is not empty, and its names are compared with field names case-insensitively. | `TestHeaderNamesCaseInsensitive` |
 | DKIM-SIG-07 | 3.5, 3.10, 6.1.1 | MUST | The domain of i= is d= or a subdomain of it; otherwise PERMFAIL (domain mismatch). | `TestVerify_UnalignedIdentityRejected`, `TestVerify_AlignedIdentityVerifies`, `TestDomainAligned`, `TestIdentityDomain`, `TestIdentitySyntax` |
 | DKIM-SIG-08 | 3.5 | Normative | l= is 1*76DIGIT; when present, only that many octets of the canonicalized body are hashed. | `TestBodyLength`, `TestVerify_NegativeBodyLength`, `TestVerify_PlusBodyLength`, `TestVerify_BodyLengthExceedsBody`, `TestBodyLengthBoundAfterCanonicalization` |
@@ -221,3 +223,13 @@ duties below remain explicit limitations, not implied implementation claims.
 | DKIM-VER-22 | 6.1.1 | SHOULD | If rejecting SDIDs as unacceptable signing entities, make that domain list configurable. | n/a: this optional domain-rejection mode is not implemented; Verify has no built-in unacceptable-domain list. Caller policy can filter reported Domain values. |
 | DKIM-VER-23 | 6.3 | SHOULD | When a verified SDID differs from From, make the actual SDID clear to the reader. | n/a: user presentation is the consuming mail system's responsibility; VerifyResult.Domain exposes the SDID independently of From (VER-02). |
 | DKIM-IANA-01 | 7 | MUST | Registry submissions include the registered name, defining document and active or historic status. | n/a: the library makes no IANA registrations; it implements the existing algorithm, tag and key registries. |
+
+## Internationalized mail (RFC 8616 §5)
+
+| ID | Section | Level | Requirement | Tests |
+|----|---------|-------|-------------|-------|
+| DKIM-EAI-01 | RFC 8616 5 | MAY | In internationalized headers d=, s= and the i= domain may be U-labels or A-labels, in any mix; a verifier accepts both. | `TestRFC8616ULabels`, `TestIdentitySyntax` |
+| DKIM-EAI-02 | RFC 8616 5 | Normative | U-labels in d= and s= are converted to A-labels for the key record lookup, and alignment compares A-labels. | `TestRFC8616ULabels`, `TestToALabels` |
+| DKIM-EAI-03 | RFC 8616 5 | MUST | Computing or verifying the hash uses the domain name in the form it occurs in the header. | `TestRFC8616HashUsesHeaderForm` |
+| DKIM-EAI-04 | RFC 8616 5 | SHOULD | Signers of internationalized messages represent IDNs in d=, s= and i= as U-labels. | n/a: explicit deviation; Sign takes A-label Domain and Selector only (SIGN-16), which RFC 8616 keeps valid, and cannot tell whether the message is internationalized. |
+| DKIM-EAI-05 | RFC 8616 5 | Normative | dkim-safe-char and the i= local-part admit UTF-8 (UTF8-2/3/4, UTF8-non-ascii) in internationalized headers; invalid UTF-8 is still malformed. | `TestRFC8616ULabels`, `TestDomainSelectorSyntax` |
