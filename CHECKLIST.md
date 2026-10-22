@@ -137,7 +137,7 @@ duties below remain explicit limitations, not implied implementation claims.
 | DKIM-SIGN-16 | 3.5 | MUST | d= and s= are DNS names, internationalized ones as A-labels. | `TestSignRejectsBadOptions` |
 | DKIM-SIGN-17 | 4.2 | SHOULD NOT | Remove existing DKIM-Signature fields when signing. | `TestSignDoesNotChangeMessage` |
 | DKIM-SIGN-18 | 3.5 | SHOULD | Use the same AUID (i=) for each message intended to be evaluated as one. | `TestSignAUIDAndExpiry` |
-| DKIM-SIGN-19 | 3.5 | MUST | x= is greater than t=. | `TestSignAUIDAndExpiry` |
+| DKIM-SIGN-19 | 3.5 | MUST | x= is greater than t=. | `TestSignAUIDAndExpiry`, `TestSignExpiration` |
 | DKIM-SIGN-20 | 5.3 | SHOULD | Convert the message to a transfer encoding that survives transit (quoted-printable or base64) before signing. | n/a: the caller builds the MIME message; the library signs the bytes it is given. |
 | DKIM-SIGN-21 | 3.7 | MUST | Hash the body after content-transfer encoding and before transport-level encoding (dot-stuffing). | `TestSignHashesBodyBeforeDotStuffing` |
 | DKIM-SIGN-22 | 5.4.1 | SHOULD | Choose the canonicalization by the kind of mail sent. | n/a: the caller's choice, through HeaderCanon and BodyCanon (relaxed by default). |
@@ -208,7 +208,7 @@ duties below remain explicit limitations, not implied implementation claims.
 | DKIM-QP-03 | 2.11 | NOT RECOMMENDED | Emit characters outside the RFC 2049 mail-safe set in DKIM-quoted-printable. | n/a: no DKIM-quoted-printable encoder is implemented; Sign emits neither i= nor z= and RecordValue emits no n= notes. |
 | DKIM-SIG-14 | 3.5 | SHOULD NOT | Reorder DKIM-Signature fields when handling them as trace fields. | n/a: the caller inserts/transports the returned field; Verify reports input order without rewriting the message. Prepending is covered separately by SIGN-02/12. |
 | DKIM-SIG-15 | 3.5 | RECOMMENDED | Include the t= signature creation timestamp. | n/a: explicit deviation at the zero-value default; Sign emits t= only when the caller sets Time greater than zero, otherwise creation time is unknown. |
-| DKIM-SIG-16 | 3.5 | RECOMMENDED | Include the x= absolute signature expiration time. | n/a: unsupported by SignOptions; signatures have no expiration. Verification of supplied x= values is covered by SIG-11–13. |
+| DKIM-SIG-16 | 3.5 | RECOMMENDED | Include the x= absolute signature expiration time. | `TestSignExpiration` |
 | DKIM-KEY-19 | 3.6.1 | RECOMMENDED | Publish t=s unless AUID subdomaining is required. | n/a: DNS publication policy belongs to the key owner; RecordValue emits no t= flags. Enforcing a supplied t=s is covered by KEY-08. |
 | DKIM-KEY-20 | 3.6.2.2 | MUST | Publish only one TXT RR for a particular selector name. | n/a: the library renders a record but does not provision DNS RRsets. Multiple received records have undefined RFC results; the chosen verifier behaviour is covered by KEY-11. |
 | DKIM-SIGN-24 | 5.3 | SHOULD | Apply local-to-CRLF normalization to the message actually transmitted, as well as the signing input. | n/a: Sign returns a field value and cannot replace the caller's transmitted message; callers must transmit the normalized bytes (CANON-10 checks hashing normalization only). |

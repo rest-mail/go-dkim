@@ -63,6 +63,12 @@ type SignOptions struct {
 	HeaderCanon string // "relaxed" (default) or "simple"
 	BodyCanon   string // "relaxed" (default) or "simple"
 	Time        int64  // t= value; 0 omits the tag
+
+	// Expiration is the x= absolute expiration time, in seconds since the
+	// epoch (RFC 6376 §3.5); 0 omits the tag. When Time is also set,
+	// Expiration must be greater than it. Verifiers treat the signature as
+	// invalid from that moment on.
+	Expiration int64
 }
 
 // DefaultSignedHeaders is the header set Sign signs when SignOptions names
@@ -84,6 +90,9 @@ var DefaultSignedHeaders = []string{
 var DefaultOversignedHeaders = []string{
 	"from", "to", "cc", "subject", "reply-to", "date", "message-id", "content-type", "mime-version",
 }
+
+// maxTimestamp is the largest t= or x= value: RFC 6376 §3.5 allows 1*12DIGIT.
+const maxTimestamp = 999999999999
 
 // minRSABits is the smallest RSA key RFC 8301 §3.2 lets a signer use or a
 // verifier accept.
@@ -132,6 +141,18 @@ func Sign(rawMessage []byte, opt SignOptions) (string, error) {
 		return "", fmt.Errorf("dkim.Sign: unsupported key type %T (want RSA or Ed25519)", pub)
 	}
 
+	// RFC 6376 §3.5: t= and x= are 1*12DIGIT, and x= MUST be greater than
+	// t=. A signature breaking either would fail at every verifier.
+	if opt.Time > maxTimestamp || opt.Expiration > maxTimestamp {
+		return "", fmt.Errorf("dkim.Sign: Time and Expiration must fit in 12 digits (RFC 6376 §3.5)")
+	}
+	if opt.Expiration < 0 {
+		return "", fmt.Errorf("dkim.Sign: Expiration %d is negative", opt.Expiration)
+	}
+	if opt.Expiration > 0 && opt.Time > 0 && opt.Expiration <= opt.Time {
+		return "", fmt.Errorf("dkim.Sign: Expiration %d is not after Time %d (RFC 6376 §3.5)", opt.Expiration, opt.Time)
+	}
+
 	headerCanon := opt.HeaderCanon
 	if headerCanon == "" {
 		headerCanon = "relaxed"
@@ -164,6 +185,9 @@ func Sign(rawMessage []byte, opt SignOptions) (string, error) {
 	tags := []string{"v=1", "a=" + algorithm, "c=" + headerCanon + "/" + bodyCanon, "d=" + opt.Domain, "s=" + opt.Selector}
 	if opt.Time > 0 {
 		tags = append(tags, fmt.Sprintf("t=%d", opt.Time))
+	}
+	if opt.Expiration > 0 {
+		tags = append(tags, fmt.Sprintf("x=%d", opt.Expiration))
 	}
 	tags = append(tags, "h="+strings.Join(hTag, ":"), "bh="+bh)
 	f := newFolder()
