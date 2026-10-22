@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/rest-mail/go-dkim/actions/workflows/ci.yml/badge.svg)](https://github.com/rest-mail/go-dkim/actions/workflows/ci.yml)
 [![Coverage gate: ≥95%](https://img.shields.io/badge/coverage%20gate-%E2%89%A595%25-brightgreen)](COVERAGE.md)
-[![Checklist: 99/110 mapped](https://img.shields.io/badge/checklist-99%2F110%20mapped-blue)](CHECKLIST.md)
+[![Checklist: 105/129 mapped](https://img.shields.io/badge/checklist-105%2F129%20mapped-blue)](CHECKLIST.md)
 [![Go Reference](https://pkg.go.dev/badge/github.com/rest-mail/go-dkim.svg)](https://pkg.go.dev/github.com/rest-mail/go-dkim)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rest-mail/go-dkim)](https://goreportcard.com/report/github.com/rest-mail/go-dkim)
 
@@ -27,7 +27,10 @@ exactly what was transmitted. That is the difference between a signature that
 survives real-world relays and one that only verifies against your own
 serializer.
 
-It is checked item by item against the RFCs in [CHECKLIST.md](CHECKLIST.md).
+The requirement inventory and section audit are in [CHECKLIST.md](CHECKLIST.md).
+Mapped rows provide executable evidence; the documented `n/a` rows include
+caller duties and explicit limitations, including omitted timestamp/expiry
+recommendations at the signing defaults.
 
 ## Features
 
@@ -155,6 +158,12 @@ PERMFAILs for a body hash or signature that does not verify are reported as
 `fail`; every other PERMFAIL (a malformed signature, a missing or unusable key)
 as `permerror`; a DNS failure as `temperror`.
 
+Empty optional `c=`, `i=`, `t=`, `x=`, `l=` and `q=` tags are malformed;
+defaults apply only when those tags are absent. A signature may cover another
+DKIM-Signature field, including that field's complete `b=` value; it never
+selects itself through `h=`. An `l=` larger than the canonicalized body or
+longer than 76 digits is a `permerror`.
+
 A resolver returns one string per TXT record, with the record's
 character-strings joined without spaces, as `net.Resolver.LookupTXT` does. A
 name that does not exist is a `*net.DNSError` whose `IsNotFound` is true; any
@@ -186,8 +195,6 @@ simplest secure option:
 
 - **An expired signature** (`x=` in the past) is a `permerror`, which
   RFC 6376 §6.1.1 allows but does not require.
-- **An `l=` larger than the body** hashes the whole body; the signature then
-  fails unless the body is unchanged.
 - **Several key records** at one selector are tried in turn; the first usable
   one is used.
 - **An RSA `p=`** may be the RSAPublicKey RFC 6376 §3.6.1 names or the
@@ -215,7 +222,7 @@ CI also fails below 95% statement coverage; the lines left uncovered on
 purpose are listed, each with a reason, in [COVERAGE.md](COVERAGE.md). The
 coverage badge states this enforced minimum; the measured percentage is in
 each CI run's `RFC proof` log. The checklist badge counts requirements mapped
-to tests over all requirements, including the 14 `n/a` rows, each with its
+to tests over all requirements, including the 24 `n/a` rows, each with its
 reason, in the total. CI validates the mappings and rejects a stale badge
 count. These badges describe the checked-in contract; the CI badge shows
 whether verification passed.
