@@ -30,6 +30,12 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
   in tag values. The hash still covers the field as it occurs in the header.
   Checklist rows DKIM-EAI-01 to 05; it now maps 110 of 134 rows.
 
+- `VerifySignatureBareTags` runs the `VerifySignatureBare` mechanism on a
+  tag-list the caller parsed itself, while the header hash still covers the
+  field as it occurs. It lets go-arc verify an ARC-Message-Signature whose
+  leading `i=` instance carries CFWS comments (RFC 8617 §3.9), which the
+  RFC 6376 tag-list grammar refuses.
+
 ### Changed
 
 - **Breaking:** a DKIM-Signature with a U-label d=, s= or i= domain, or other

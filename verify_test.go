@@ -1871,3 +1871,61 @@ func TestKeyRecordAllowsService(t *testing.T) {
 		}
 	}
 }
+
+// TestVerifySignatureBareTags pins the caller-parsed seam beneath
+// VerifySignatureBare. An ARC-Message-Signature may open with a commented
+// instance ("i (hop) = 1;", RFC 8617 §3.9) that the RFC 6376 §3.2 tag-list
+// grammar refuses: VerifySignatureBare must keep refusing it, while the same
+// signature verifies once the caller supplies its own parse. The header hash
+// still covers the header as it occurs, so tags that disagree with the signed
+// header fail, and the caller's map is never rewritten.
+//
+// checklist: DKIM-VER-17
+func TestVerifySignatureBareTags(t *testing.T) {
+	ctx := context.Background()
+	resolver := recordResolver(map[string]string{"s._domainkey.example.test": keyRecord(t, edKey)})
+	raw := signWithTags(t, edKey, "i (hop) = 1; a=ed25519-sha256; c=relaxed/relaxed; d=example.test; s=s; h=from:subject", "relaxed", "relaxed", simpleMsg)
+	sig, headers, body := splitToSig(t, []byte(raw))
+
+	if res := VerifySignatureBare(ctx, sig, headers, body, resolver); res.Result != ResultPermError {
+		t.Fatalf("bare: commented instance must stay a tag-list error, got %s (%s)", res.Result, res.Reason)
+	}
+	parsed := func() map[string]string {
+		tags, err := ParseTagListStrict(strings.Replace(sig.Value, "i (hop) = 1;", "i=1;", 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tags
+	}
+	if res := VerifySignatureBareTags(ctx, parsed(), sig, headers, body, resolver); res.Result != ResultPass {
+		t.Errorf("caller-parsed tags must verify, got %s (%s)", res.Result, res.Reason)
+	}
+
+	// The tags drive the mechanism; the raw header drives the hash.
+	for name, mutate := range map[string]func(map[string]string){
+		"h= narrowed":    func(m map[string]string) { m["h"] = "from" },
+		"c= changed":     func(m map[string]string) { m["c"] = "simple/simple" },
+		"d= elsewhere":   func(m map[string]string) { m["d"] = "other.test" },
+		"b= missing":     func(m map[string]string) { delete(m, "b") },
+		"bh= tampered":   func(m map[string]string) { m["bh"] = "AAAA" },
+		"a= unsupported": func(m map[string]string) { m["a"] = "rsa-sha1" },
+	} {
+		tags := parsed()
+		mutate(tags)
+		if res := VerifySignatureBareTags(ctx, tags, sig, headers, body, resolver); res.Result == ResultPass {
+			t.Errorf("%s: want a failure, got pass", name)
+		}
+	}
+	altered := parsed()
+	sig.Value = strings.Replace(sig.Value, "i (hop) = 1;", "i=1;", 1)
+	if res := VerifySignatureBareTags(ctx, altered, sig, headers, body, resolver); res.Result == ResultPass {
+		t.Error("a header rewritten to match the tags must fail: the hash covers the header as signed")
+	}
+
+	// U-labels are converted on a copy (RFC 8616 §5), not in the caller's map.
+	tags := map[string]string{"d": "bücher.example", "s": "s", "i": "@bücher.example"}
+	VerifySignatureBareTags(ctx, tags, sig, headers, body, resolver)
+	if tags["d"] != "bücher.example" || tags["i"] != "@bücher.example" {
+		t.Errorf("caller's tags were modified: %v", tags)
+	}
+}

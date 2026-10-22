@@ -265,11 +265,33 @@ func VerifySignatureBare(ctx context.Context, sig Header, allHeaders []Header, b
 	return res
 }
 
-// verifyMechanism is the shared policy-free core beneath VerifySignatureBare and
-// VerifySignature. Given the already-parsed tags it runs the pure verification
-// mechanism and returns the VerifyResult plus, on a Pass, the selected key
-// record's KeyFlags (the t=s / s= policy tags) so a DKIM caller can enforce them.
-// On any non-Pass outcome the returned KeyFlags is the zero value.
+// VerifySignatureBareTags is VerifySignatureBare for a caller that has already
+// parsed the signature's tag-list itself. A layered scheme whose grammar is wider
+// than RFC 6376 §3.2 needs it: RFC 8617 §3.9 lets the leading i= instance of an
+// ARC-Message-Signature carry CFWS comments ("i (hop) = 1;"), which the DKIM
+// tag-list grammar refuses, so an ARC verifier parses the instance itself and
+// passes the resulting tags here.
+//
+// tags drives the mechanism (a=, b=, bh=, c=, d=, h=, l=, s=); sig is still the
+// header exactly as it occurs, because the header hash covers it with only the
+// b= value emptied. The caller owns the tag-list's strictness, duplicate names
+// included. tags is not modified; U-labels in d=, s= and the i= domain are
+// converted to A-labels on a copy (RFC 8616 §5), as VerifySignatureBare does.
+func VerifySignatureBareTags(ctx context.Context, tags map[string]string, sig Header, allHeaders []Header, body string, resolver TXTResolver) VerifyResult {
+	own := make(map[string]string, len(tags))
+	for k, v := range tags {
+		own[k] = v
+	}
+	aLabelTags(own)
+	res, _ := verifyMechanism(ctx, own, sig, allHeaders, body, resolver)
+	return res
+}
+
+// verifyMechanism is the shared policy-free core beneath VerifySignatureBare,
+// VerifySignatureBareTags and VerifySignature. Given the already-parsed tags it
+// runs the pure verification mechanism and returns the VerifyResult plus, on a
+// Pass, the selected key record's KeyFlags (the t=s / s= policy tags) so a DKIM
+// caller can enforce them. On any non-Pass outcome the returned KeyFlags is the zero value.
 func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, allHeaders []Header, body string, resolver TXTResolver) (VerifyResult, KeyFlags) {
 	res := VerifyResult{Domain: tags["d"], Selector: tags["s"]}
 	permfail := func(reason string) (VerifyResult, KeyFlags) {

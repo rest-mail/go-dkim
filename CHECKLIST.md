@@ -198,7 +198,7 @@ duties below remain explicit limitations, not implied implementation claims.
 | DKIM-VER-14 | 6.3 | SHOULD | Reject with 550/5.7.x when rejecting on a DKIM result; reply 4xx only for temporary failures (permanent ones MUST NOT). | n/a: the library sends no SMTP replies; it reports temperror and permerror apart, as that choice needs. |
 | DKIM-VER-15 | 4.2 | SHOULD | Identity Assessors ignore signatures that PERMFAILed. | n/a: assessing identities is the caller's; each result says whether it passed. |
 | DKIM-VER-16 | 8.9 | MUST | Be robust against malformed DKIM-Signature fields: no crash, no hang, a PERMFAIL. | `FuzzParseTagList`, `FuzzSignatureHeader`, `TestMalformedKeyRecords`, `TestVerify_NegativeBodyLength`, `TestVerify_BodyLengthExceedsBody` |
-| DKIM-VER-17 | 6.1.2, 6.1.3 | Normative | Key retrieval and the hash and signature check (6.1.2, 6.1.3) run apart from the field checks of 6.1.1, so a scheme reusing them (ARC) applies its own. | `TestVerifySignatureBare_VersionlessSeam`, `TestVerifySignatureBare_IgnoresIdentityAlignment`, `TestVerifySignatureBare_IgnoresKeyPolicyFlags` |
+| DKIM-VER-17 | 6.1.2, 6.1.3 | Normative | Key retrieval and the hash and signature check (6.1.2, 6.1.3) run apart from the field checks of 6.1.1, so a scheme reusing them (ARC) applies its own. | `TestVerifySignatureBare_VersionlessSeam`, `TestVerifySignatureBare_IgnoresIdentityAlignment`, `TestVerifySignatureBare_IgnoresKeyPolicyFlags`, `TestVerifySignatureBareTags` |
 
 ## Additional clauses found by the section audit
 

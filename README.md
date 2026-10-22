@@ -173,8 +173,9 @@ other error is transient.
 
 The canonicalization and single-signature building blocks are exported —
 `SplitMessage`, `CanonicalizeHeader`, `CanonicalizeBody`, `BuildSignedHeaders`,
-`VerifySignature`, `VerifySignatureBare`, `FetchKey`, `ParseTagList`,
-`ParseTagListStrict`, `RemoveBValue`, `StripWSP` and `HashBytes` — so a layered
+`VerifySignature`, `VerifySignatureBare`, `VerifySignatureBareTags`, `FetchKey`,
+`ParseTagList`, `ParseTagListStrict`, `RemoveBValue`, `StripWSP` and `HashBytes`
+— so a layered
 scheme whose signature is structurally a DKIM-Signature (such as ARC's
 ARC-Message-Signature) can reuse the exact same canonicalization and crypto path.
 `FetchKey` returns the RSA key at a selector, for an `rsa-sha256` signature such
@@ -187,6 +188,12 @@ mechanism (header/body canonicalization, hashing, and the signature check agains
 `t=s` / `s=` flags — so a versionless ARC-Message-Signature (RFC 8617 §4.1.2)
 verifies and the scheme applies its own policy on top. `VerifySignature` is that
 same primitive plus the full DKIM policy, for standalone DKIM.
+
+A scheme whose tag-list grammar is wider than RFC 6376 §3.2 parses the signature
+itself and calls `VerifySignatureBareTags` with the result. ARC needs this for
+the CFWS comments RFC 8617 §3.9 allows around a leading `i=` instance, which the
+DKIM grammar refuses. The tags drive the mechanism, while the header hash still
+covers the signature field exactly as it occurs.
 
 ## Choices the RFCs leave open
 
