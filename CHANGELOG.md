@@ -19,6 +19,11 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
   The checklist now maps 105 of 129 rows; 24 remain n/a, including caller
   duties and unsupported recommendations. The required-signed-header Verify
   option remains an owner decision.
+- `SignOptions.Expiration` emits the `x=` expiration time RFC 6376 §3.5
+  recommends (DKIM-SIG-16); zero, the default, still omits it. Sign refuses an
+  Expiration at or before Time, a negative one, and a Time or Expiration of
+  more than 12 digits, all of which would make the signature invalid. The
+  checklist now maps 106 of 129 rows.
 
 ### Fixed
 
