@@ -13,7 +13,25 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
 - Tests for three checklist rows that were n/a: Sign gives every message the
   same AUID and emits no expiry (DKIM-SIGN-18, DKIM-SIGN-19), and it hashes
   the body before SMTP dot-stuffing (DKIM-SIGN-21). The checklist now maps
-  99 of 110 requirements.
+  99 of 110 requirements at that revision.
+- A section audit of RFC 6376, RFC 8301 and RFC 8463 adds 19 omitted clauses,
+  six mapped to five new test functions and thirteen with explicit n/a reasons.
+  The checklist now maps 105 of 129 rows; 24 remain n/a, including caller
+  duties and unsupported recommendations. The required-signed-header Verify
+  option remains an owner decision.
+
+### Fixed
+
+- Present empty optional signature tags no longer inherit absent-tag defaults;
+  `c=simple/` is also refused instead of silently selecting a simple body.
+- `BuildSignedHeaders` excludes the signature currently being checked from
+  `h=` selection. Previously, a signature covering another DKIM-Signature could
+  fail when the two fields were reordered. The covered field's `b=` remains
+  signed in full, and the caller's header slice is preserved.
+- An `l=` larger than the canonicalized body now returns `permerror` instead
+  of hashing the whole available body and potentially passing. The 76-digit
+  grammar limit is enforced even for leading zeroes. This changes verification
+  results for malformed signatures; no public API was added.
 
 ## [0.3.1] - 2026-10-17
 

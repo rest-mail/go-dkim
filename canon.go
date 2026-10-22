@@ -341,8 +341,11 @@ func bytesEqual(a, b []byte) bool { return bytes.Equal(a, b) }
 // negative l= would parse cleanly and then slice the body with a negative bound
 // (canonBody[:-1]), panicking — a remotely triggerable crash since the
 // signature header is attacker-controlled. strconv.Atoi still rejects values
-// that overflow int, and an empty value.
+// that overflow int; the grammar also limits the value to 1–76 digits.
 func parseUint(s string) (int, error) {
+	if len(s) == 0 || len(s) > 76 {
+		return 0, strconv.ErrSyntax
+	}
 	for i := 0; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
 			return 0, strconv.ErrSyntax

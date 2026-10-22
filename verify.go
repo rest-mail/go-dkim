@@ -147,7 +147,7 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	// mismatch). Its domain, like d=, must be in A-label form (§3.5). When i= is
 	// absent its default is "@"+d (§3.5), trivially aligned, so no check is
 	// needed.
-	if iTag := tags["i"]; iTag != "" {
+	if iTag, present := tags["i"]; present {
 		idomain, ok := identityDomain(iTag)
 		if !ok || !validDNSName(idomain) || !domainAligned(idomain, tags["d"]) {
 			return permfail(fmt.Sprintf("i= domain %q not aligned with d= domain %q", idomain, tags["d"]))
@@ -171,14 +171,14 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 		tVal  int64
 		haveT bool
 	)
-	if tTag := tags["t"]; tTag != "" {
+	if tTag, present := tags["t"]; present {
 		tv, terr := parseTimeTag(tTag)
 		if terr != nil {
 			return permfail("invalid t= tag")
 		}
 		tVal, haveT = tv, true
 	}
-	if xTag := tags["x"]; xTag != "" {
+	if xTag, present := tags["x"]; present {
 		xVal, xerr := parseTimeTag(xTag)
 		if xerr != nil {
 			return permfail("invalid x= tag")
@@ -221,7 +221,7 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	// PERMFAILs. When i= is absent its default is "@"+d (§3.5), whose domain
 	// equals d exactly, so t=s is trivially satisfied and no check is needed.
 	if flags.NoSubdomain {
-		if iTag := tags["i"]; iTag != "" {
+		if iTag, present := tags["i"]; present {
 			idomain, _ := identityDomain(iTag)
 			if !strings.EqualFold(trimFWS(idomain), trimFWS(tags["d"])) {
 				return permfail(fmt.Sprintf("i= domain %q must equal d= domain %q exactly: key record forbids subdomaining (t=s)", idomain, tags["d"]))
@@ -325,10 +325,10 @@ func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, al
 
 	// Canonicalization: c=header/body, default simple/simple.
 	headerCanon, bodyCanon := "simple", "simple"
-	if c := tags["c"]; c != "" {
+	if c, present := tags["c"]; present {
 		parts := strings.SplitN(c, "/", 2)
 		headerCanon = parts[0]
-		if len(parts) == 2 && parts[1] != "" {
+		if len(parts) == 2 {
 			bodyCanon = parts[1]
 		} else {
 			bodyCanon = "simple" // "c=relaxed" means relaxed header, simple body
@@ -343,14 +343,15 @@ func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, al
 
 	// ── Body hash ────────────────────────────────────────────────────
 	canonBody := CanonicalizeBody(body, bodyCanon)
-	if l := tags["l"]; l != "" {
+	if l, present := tags["l"]; present {
 		n, err := parseUint(l)
 		if err != nil {
 			return permfail("invalid l= tag")
 		}
-		if n < len(canonBody) {
-			canonBody = canonBody[:n]
+		if n > len(canonBody) {
+			return permfail("l= exceeds canonicalized body length")
 		}
+		canonBody = canonBody[:n]
 	}
 	computedBH := HashBytes(hashType, []byte(canonBody))
 	expectedBH, err := decodeBase64Tag(tags["bh"])
@@ -668,6 +669,17 @@ func keyRecordAllowsService(sTag string) bool {
 // It is exported so a signer or a layered scheme (ARC's ARC-Message-Signature)
 // can produce the exact bytes VerifySignature will hash.
 func BuildSignedHeaders(hTag string, allHeaders []Header, sig Header, canon string) string {
+	// The field being verified is added implicitly below, never selected by
+	// h=. Other signature fields retain their complete b= values (§3.5).
+	// Copy only when sig occurs in the input; never alter the caller's slice.
+	for i, h := range allHeaders {
+		if h == sig {
+			headers := make([]Header, 0, len(allHeaders)-1)
+			headers = append(headers, allHeaders[:i]...)
+			allHeaders = append(headers, allHeaders[i+1:]...)
+			break
+		}
+	}
 	// Track, per lowercased name, how many instances we've already consumed so
 	// repeated names match from the bottom of the header block upward (RFC 6376
 	// §5.4.2).

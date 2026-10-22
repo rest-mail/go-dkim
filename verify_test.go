@@ -344,8 +344,7 @@ func TestVerify_PlusBodyLength(t *testing.T) {
 
 // TestVerify_BodyLengthExceedsBody guards the other slice bound: an l= count far
 // larger than the canonicalized body must not slice past the end (which would
-// also panic). The whole available body is used, so the injected tag simply
-// breaks the signature — the result is a clean failure, not a crash.
+// also panic). The invalid length is refused before hashing or key retrieval.
 //
 // checklist: DKIM-SIG-08 DKIM-VER-16
 func TestVerify_BodyLengthExceedsBody(t *testing.T) {
@@ -358,8 +357,8 @@ func TestVerify_BodyLengthExceedsBody(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("want 1 result, got %d", len(results))
 	}
-	if results[0].Result != ResultFail {
-		t.Errorf("want fail (no panic) on oversized l=, got %s (%s)", results[0].Result, results[0].Reason)
+	if results[0].Result != ResultPermError || results[0].Reason != "l= exceeds canonicalized body length" {
+		t.Errorf("want permerror (no panic) on oversized l=, got %s (%s)", results[0].Result, results[0].Reason)
 	}
 }
 
