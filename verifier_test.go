@@ -243,16 +243,17 @@ func TestUnknownTagsIgnored(t *testing.T) {
 }
 
 // TestDomainSelectorSyntax checks that a signature whose d= or s= is not a DNS
-// name in A-label form is a permanent error and sends no query.
+// name (after RFC 8616 U-labels become A-labels; invalid UTF-8 cannot) is a
+// permanent error and sends no query.
 //
-// checklist: DKIM-SIG-05
+// checklist: DKIM-SIG-05 DKIM-EAI-05
 func TestDomainSelectorSyntax(t *testing.T) {
 	headers, body := SplitMessage([]byte(simpleMsg))
 	noDNS := func(context.Context, string) ([]string, error) {
 		t.Error("a key was fetched for an invalid name")
 		return nil, errors.New("unexpected")
 	}
-	for _, ds := range [][2]string{{"bücher.example", "s"}, {"example..test", "s"}, {"example.test", "a b"}, {"example.test", "s\x00"}} {
+	for _, ds := range [][2]string{{"b\xffcher.example", "s"}, {"example.test", "m\xfcnchen"}, {"example..test", "s"}, {"example.test", "a b"}, {"example.test", "s\x00"}} {
 		value := " v=1; a=rsa-sha256; b=AAAA; bh=AAAA; d=" + ds[0] + "; h=from; s=" + ds[1]
 		r := VerifySignatureBare(context.Background(), Header{Name: "DKIM-Signature", Value: value, Raw: "DKIM-Signature:" + value}, headers, body, noDNS)
 		if r.Result != ResultPermError {
@@ -523,13 +524,14 @@ func TestSimpleCanonBFirst(t *testing.T) {
 	}
 }
 
-// TestIdentitySyntax checks that an i= whose domain is not in A-label form is
-// a permanent error even when it ends in d=.
+// TestIdentitySyntax checks that an i= whose domain is not a DNS name is a
+// permanent error even when it ends in d=, and that a U-label i= domain (RFC
+// 8616) is compared with d= in A-label form.
 //
-// checklist: DKIM-SIG-05 DKIM-SIG-07
+// checklist: DKIM-SIG-05 DKIM-SIG-07 DKIM-EAI-01
 func TestIdentitySyntax(t *testing.T) {
 	records := map[string]string{"s._domainkey.example.test": keyRecord(t, edKey)}
-	for i, want := range map[string]string{"@example.test": ResultPass, "user@sub.example.test": ResultPass, "@bücher.example.test": ResultPermError, "@a..example.test": ResultPermError} {
+	for i, want := range map[string]string{"@example.test": ResultPass, "user@sub.example.test": ResultPass, "@bücher.example.test": ResultPass, "@b\xffcher.example.test": ResultPermError, "@a..example.test": ResultPermError} {
 		msg := signWithTags(t, edKey, "v=1; a=ed25519-sha256; d=example.test; i="+i+"; s=s; h=from", "simple", "simple", simpleMsg)
 		if r := verifyOne(t, msg, records); r.Result != want {
 			t.Errorf("i=%s: got %+v, want %s", i, r, want)

@@ -24,6 +24,18 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
   Expiration at or before Time, a negative one, and a Time or Expiration of
   more than 12 digits, all of which would make the signature invalid. The
   checklist now maps 106 of 129 rows.
+- RFC 8616 §5 internationalized mail: the verifier accepts U-labels in d=,
+  s= and the i= domain (A-labels stay valid), looks the key up under the
+  A-label name, compares alignment in A-label form and admits well-formed UTF-8
+  in tag values. The hash still covers the field as it occurs in the header.
+  Checklist rows DKIM-EAI-01 to 05; it now maps 110 of 134 rows.
+
+### Changed
+
+- **Breaking:** a DKIM-Signature with a U-label d=, s= or i= domain, or other
+  well-formed UTF-8 in a tag value, was a permerror; it is now verified as RFC
+  8616 §5 requires. VerifyResult.Domain and Selector report the A-label form.
+  Invalid UTF-8 is still a permerror.
 
 ### Fixed
 

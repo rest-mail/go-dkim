@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // SplitMessage normalizes line endings to CRLF and splits a raw RFC 5322
@@ -265,15 +266,18 @@ func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
 // validTagValue reports whether a trimmed tag value holds only the RFC 6376
 // §3.2 tag-value characters: VALCHAR (printable US-ASCII except ";") and the
-// whitespace of FWS between them.
+// whitespace of FWS between them. RFC 8616 §5 adds UTF-8 for internationalized
+// headers (U-labels in d=, s= and i=, UTF-8 in the i= local-part and
+// dkim-safe-char), so well-formed non-ASCII UTF-8 is accepted too; invalid
+// UTF-8 is not.
 func validTagValue(val string) bool {
 	for i := 0; i < len(val); i++ {
 		c := val[i]
-		if (c < 0x21 || c > 0x7e) && c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+		if (c < 0x21 || c > 0x7e) && c != ' ' && c != '\t' && c != '\r' && c != '\n' && c < 0x80 {
 			return false
 		}
 	}
-	return true
+	return utf8.ValidString(val)
 }
 
 // RemoveBValue blanks the value of the b= tag in a signature field (a

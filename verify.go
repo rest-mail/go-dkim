@@ -110,6 +110,7 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	if err != nil {
 		return VerifyResult{Result: ResultPermError, Reason: err.Error()}
 	}
+	aLabelTags(tags)
 
 	res := VerifyResult{Domain: tags["d"], Selector: tags["s"]}
 	permfail := func(reason string) VerifyResult { res.Result = ResultPermError; res.Reason = reason; return res }
@@ -259,6 +260,7 @@ func VerifySignatureBare(ctx context.Context, sig Header, allHeaders []Header, b
 	if err != nil {
 		return VerifyResult{Result: ResultPermError, Reason: err.Error()}
 	}
+	aLabelTags(tags)
 	res, _ := verifyMechanism(ctx, tags, sig, allHeaders, body, resolver)
 	return res
 }
@@ -307,8 +309,9 @@ func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, al
 	}
 
 	// Signing domain and selector (RFC 6376 §3.5): DNS names, internationalized
-	// ones as A-labels. Anything else cannot name a key record, and is not sent
-	// to the resolver.
+	// ones as A-labels. U-labels, which RFC 8616 §5 allows, were converted by
+	// aLabelTags. Anything else cannot name a key record, and is not sent to the
+	// resolver.
 	if !validDNSName(tags["d"]) {
 		return permfail("d= is not a DNS name in A-label form")
 	}
@@ -407,6 +410,24 @@ func headerListCoversFrom(hTag string) bool {
 		}
 	}
 	return false
+}
+
+// aLabelTags rewrites the U-labels of d=, s= and the i= domain in tags to
+// A-labels (RFC 8616 §5). Every later check, the alignment comparisons and the
+// key record name then see one form, while the header hash still covers the
+// field text exactly as it occurs in sig. The i= local-part, which RFC 8616
+// lets carry UTF-8, is kept as it is.
+func aLabelTags(tags map[string]string) {
+	for _, k := range []string{"d", "s"} {
+		if v, ok := tags[k]; ok {
+			tags[k] = toALabels(v)
+		}
+	}
+	if iTag, ok := tags["i"]; ok {
+		if at := strings.LastIndexByte(iTag, '@'); at >= 0 {
+			tags["i"] = iTag[:at+1] + toALabels(iTag[at+1:])
+		}
+	}
 }
 
 // identityDomain returns the domain part of a DKIM i= (AUID) tag value: the
