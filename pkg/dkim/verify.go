@@ -11,6 +11,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/rest-mail/go-dkim/pkg/dkim/internal/idna"
 )
 
 // timeNow is the clock VerifySignature reads to decide whether a signature's x=
@@ -442,12 +444,12 @@ func headerListCoversFrom(hTag string) bool {
 func aLabelTags(tags map[string]string) {
 	for _, k := range []string{"d", "s"} {
 		if v, ok := tags[k]; ok {
-			tags[k] = toALabels(v)
+			tags[k] = idna.ToALabels(v)
 		}
 	}
 	if iTag, ok := tags["i"]; ok {
 		if at := strings.LastIndexByte(iTag, '@'); at >= 0 {
-			tags["i"] = iTag[:at+1] + toALabels(iTag[at+1:])
+			tags["i"] = iTag[:at+1] + idna.ToALabels(iTag[at+1:])
 		}
 	}
 }

@@ -13,9 +13,10 @@ an explicit deviation; it does not mean that requirement has been satisfied.
 A section number alone is RFC 6376; the others are named.
 
 An item that does not apply to a library (because it is the receiver's policy,
-say) says "n/a" and why. CI checks this file against the tests with
-`go run ./internal/checklist`; the format is described in the
-[README](README.md#the-rfc-checklist).
+say) says "n/a" and why. CI checks this file against the tests in
+`pkg/dkim` and `pkg/dkim/internal/idna` with
+`go run ./internal/checklist ./pkg/dkim ./pkg/dkim/internal/idna`; the format
+is described in the [README](README.md#the-rfc-checklist).
 
 ## Audit scope (2026-10-22)
 

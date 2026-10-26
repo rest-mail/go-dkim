@@ -1,4 +1,4 @@
-package dkim
+package idna
 
 import (
 	"math"
@@ -6,7 +6,7 @@ import (
 	"unicode/utf8"
 )
 
-// toALabels converts every U-label of domain to its A-label (xn-- punycode)
+// ToALabels converts every U-label of domain to its A-label (xn-- punycode)
 // form. RFC 8616 §5 lets an internationalized message carry d=, s= and the i=
 // domain as U-labels; the key record is still looked up, and the names still
 // compared, in A-label form. An all-ASCII label is returned as it is; a label
@@ -17,7 +17,7 @@ import (
 // The full IDNA2008 mapping (NFC normalization, special folds such as ß, and
 // label validation) is out of scope for a dependency-free verifier; only
 // deliberately unusual spellings differ.
-func toALabels(domain string) string {
+func ToALabels(domain string) string {
 	if isASCII(domain) || !utf8.ValidString(domain) {
 		return domain
 	}
