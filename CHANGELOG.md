@@ -6,6 +6,31 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-26
+
+### Changed (breaking)
+
+- The library moves out of the module root into `pkg/dkim`. The module path is
+  unchanged (`github.com/rest-mail/go-dkim`), but the root package is gone:
+  - `github.com/rest-mail/go-dkim/pkg/dkim` holds the whole public API, with
+    every name unchanged: signing, verifying, the single-signature and
+    canonicalization primitives, and the key and DNS record helpers. The
+    package is still called `dkim`, so code that imports it needs only the new
+    import path.
+  - `pkg/dkim/internal/idna` holds the U-label to A-label conversion the
+    verifier uses for RFC 8616 names. It is internal, so it is not importable.
+
+Signing and verification behave as they did in v0.4.0.
+
+Migration: replace the import.
+
+| Before (v0.4) | After (v0.5) |
+|---------------|--------------|
+| `import "github.com/rest-mail/go-dkim"` | `import "github.com/rest-mail/go-dkim/pkg/dkim"` |
+| `dkim.Sign`, `dkim.Verify`, `dkim.SignOptions`, `dkim.VerifyResult`, `dkim.TXTResolver`, `dkim.Header`, `dkim.KeyFlags`, the `dkim.Result*` values, `dkim.SplitMessage`, `dkim.CanonicalizeHeader`, `dkim.CanonicalizeBody`, `dkim.BuildSignedHeaders`, `dkim.VerifySignature`, `dkim.VerifySignatureBare`, `dkim.VerifySignatureBareTags`, `dkim.FetchKey`, `dkim.ParseTagList`, `dkim.ParseTagListStrict`, `dkim.RemoveBValue`, `dkim.StripWSP`, `dkim.HashBytes`, `dkim.ParsePrivateKey`, `dkim.GenerateKey`, `dkim.RecordName`, `dkim.RecordValue`, `dkim.RecordFragment`, `dkim.DefaultSelector`, `dkim.DefaultSignedHeaders`, `dkim.DefaultOversignedHeaders` | unchanged, now from `.../pkg/dkim` |
+
+## [0.4.0] - 2026-10-23
+
 ### Added
 
 - README coverage-gate and RFC checklist badges, checked in CI against the

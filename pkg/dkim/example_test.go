@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rest-mail/go-dkim"
+	"github.com/rest-mail/go-dkim/pkg/dkim"
 )
 
 // Example signs a message and then verifies it. It uses an in-memory DNS

@@ -16,8 +16,11 @@ const tableHeader = "| ID | Section | Level | Requirement | Tests |\n|----|-----
 func TestReadmeChecklistBadge(t *testing.T) {
 	root := filepath.Join("..", "..")
 	file := filepath.Join(root, "CHECKLIST.md")
+	// The package directories CI passes to the checker (checklist-dirs in
+	// .github/workflows/ci.yml).
+	dirs := []string{filepath.Join(root, "pkg", "dkim"), filepath.Join(root, "pkg", "dkim", "internal", "idna")}
 	var out bytes.Buffer
-	if code := run([]string{"-file", file, root}, &out, &out); code != 0 {
+	if code := run(append([]string{"-file", file}, dirs...), &out, &out); code != 0 {
 		t.Fatalf("invalid repository checklist (exit %d):\n%s", code, out.String())
 	}
 	items, err := parseChecklist(file, func(format string, args ...any) {

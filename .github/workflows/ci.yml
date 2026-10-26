@@ -19,13 +19,13 @@ jobs:
     uses: rest-mail/go-spf/.github/workflows/rfc-verification.yml@7d291c08d310b9c62afc287e75a534a39150fafb
     with:
       packages: '["./..."]'
-      checklist-dirs: '["."]'
+      checklist-dirs: '["./pkg/dkim","./pkg/dkim/internal/idna"]'
       fuzz-targets: >-
-        [{"package":".","target":"FuzzParseTagList"},
-         {"package":".","target":"FuzzSignatureHeader"},
-         {"package":".","target":"FuzzKeyRecord"},
-         {"package":".","target":"FuzzCanonicalization"},
-         {"package":".","target":"FuzzSignVerify"}]
+        [{"package":"./pkg/dkim","target":"FuzzParseTagList"},
+         {"package":"./pkg/dkim","target":"FuzzSignatureHeader"},
+         {"package":"./pkg/dkim","target":"FuzzKeyRecord"},
+         {"package":"./pkg/dkim","target":"FuzzCanonicalization"},
+         {"package":"./pkg/dkim","target":"FuzzSignVerify"}]
 
   fixtures:
     name: Workflow fixtures
