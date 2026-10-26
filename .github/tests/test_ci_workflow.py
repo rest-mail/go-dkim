@@ -22,10 +22,21 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 CALLER = (ROOT / ".github/workflows/ci.yml").read_text()
-PIN = "7d291c08d310b9c62afc287e75a534a39150fafb"
+PIN = "2409e76ef1e501e0222e6c25a0c7a6202de1051b"
 PRODUCER = "rest-mail/go-spf/.github/workflows/rfc-verification.yml@" + PIN
 FUZZ_PACKAGE = "./pkg/dkim"
-CHECKLIST_DIRS = ["./pkg/dkim", "./pkg/dkim/internal/idna"]
+CHECKLIST_DIRS = [
+    "./pkg/dkim",
+    "./pkg/dkim/internal/codec",
+    "./pkg/dkim/internal/folding",
+    "./pkg/dkim/internal/grammar",
+    "./pkg/dkim/internal/idna",
+    "./pkg/dkim/internal/keyrecord",
+]
+FUZZ_PACKAGES = {
+    "FuzzParseTagList": "./pkg/dkim/internal/grammar",
+    "FuzzKeyRecord": "./pkg/dkim/internal/keyrecord",
+}
 TARGETS = [
     "FuzzParseTagList",
     "FuzzSignatureHeader",
@@ -132,7 +143,11 @@ class CallerFixtures(unittest.TestCase):
     def test_fuzz_targets_are_exactly_the_repository_targets(self):
         targets = folded_input("fuzz-targets")
         self.assertEqual(
-            targets, [{"package": FUZZ_PACKAGE, "target": name} for name in TARGETS]
+            targets,
+            [
+                {"package": FUZZ_PACKAGES.get(name, FUZZ_PACKAGE), "target": name}
+                for name in TARGETS
+            ],
         )
         key = lambda item: (item["package"], item["target"])
         self.assertEqual(
@@ -226,12 +241,16 @@ class ProducerContractFixtures(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                *[("test", "-list=^Fuzz", FUZZ_PACKAGE)] * len(TARGETS),
+                *[
+                    ("test", "-list=^Fuzz", FUZZ_PACKAGES.get(name, FUZZ_PACKAGE))
+                    for name in TARGETS
+                ],
                 (
                     "test",
                     "-race",
                     "-count=1",
                     "-covermode=atomic",
+                    "-coverpkg=" + ",".join(quoted_input("packages")),
                     "-coverprofile=coverage.out",
                     "./...",
                 ),
@@ -249,7 +268,7 @@ class ProducerContractFixtures(unittest.TestCase):
                         "-run=^$",
                         f"-fuzz=^{name}$",
                         "-fuzztime=30s",
-                        FUZZ_PACKAGE,
+                        FUZZ_PACKAGES.get(name, FUZZ_PACKAGE),
                     )
                     for name in TARGETS
                 ],

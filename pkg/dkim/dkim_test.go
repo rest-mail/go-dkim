@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/rest-mail/go-dkim/pkg/dkim/internal/grammar"
 )
 
 // TestParseTagListStrict pins the RFC 6376 §3.2 strict tag-list parser: a
@@ -89,25 +91,28 @@ func TestParseTagListStrictFWS(t *testing.T) {
 //
 // checklist: DKIM-TAG-08
 func TestWireWhitespaceIsFWS(t *testing.T) {
+	if got := StripWSP(" \tA\r\nB\f\u00a0"); got != "AB\f\u00a0" {
+		t.Errorf("StripWSP = %q", got)
+	}
 	if got := RemoveBValue("v=1; b\f=keep; b =drop"); got != "v=1; b\f=keep; b =" {
 		t.Errorf("RemoveBValue = %q", got)
 	}
-	if got := firstTagName("\r\n v =DKIM1"); got != "v" {
+	if got := grammar.FirstTagName("\r\n v =DKIM1"); got != "v" {
 		t.Errorf("firstTagName with FWS = %q", got)
 	}
-	if got := firstTagName("\u00a0v=DKIM1"); got != "\u00a0v" {
+	if got := grammar.FirstTagName("\u00a0v=DKIM1"); got != "\u00a0v" {
 		t.Errorf("firstTagName with U+00A0 = %q", got)
 	}
-	if !listContains(" sha1 :\r\n\tsha256 ", "sha256") || listContains("sha256\v", "sha256") {
+	if !grammar.ListContains(" sha1 :\r\n\tsha256 ", "sha256") || grammar.ListContains("sha256\v", "sha256") {
 		t.Error("listContains trims something other than FWS")
 	}
-	if !headerListCoversFrom("to : from") || headerListCoversFrom("to:from\f") {
+	if !grammar.HeaderListCoversFrom("to : from") || grammar.HeaderListCoversFrom("to:from\f") {
 		t.Error("headerListCoversFrom trims something other than FWS")
 	}
-	if !domainAligned(" mail.example.test", "example.test ") || domainAligned("example.test\u0085", "example.test") {
+	if !grammar.DomainAligned(" mail.example.test", "example.test ") || grammar.DomainAligned("example.test\u0085", "example.test") {
 		t.Error("domainAligned trims something other than FWS")
 	}
-	if _, err := parseTimeTag("\f1700000000"); err == nil {
+	if _, err := grammar.ParseTimeTag("\f1700000000"); err == nil {
 		t.Error("parseTimeTag accepted a form feed")
 	}
 	if got := BuildSignedHeaders(" from \f", []Header{{Name: "From", Value: " a", Raw: "From: a"}}, Header{Name: "S", Value: "b=x", Raw: "S:b=x"}, "relaxed"); got != "s:b=" {

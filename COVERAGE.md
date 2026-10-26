@@ -1,6 +1,10 @@
 # Coverage exceptions
 
-CI fails when statement coverage of `./...` falls below 95%. These are the
+CI measures statement coverage across `./...` with `-coverpkg=./...` and fails
+below 95%. Tests in `pkg/dkim` count toward the grammar, codec, folding,
+key-record and IDNA helpers they exercise, even across package boundaries.
+The shared RFC proof is pinned to go-spf commit
+`2409e76ef1e501e0222e6c25a0c7a6202de1051b`. These are the
 statements left uncovered on purpose, each with the reason. Add an entry here
 whenever you leave a statement uncovered.
 

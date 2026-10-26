@@ -16,6 +16,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/rest-mail/go-dkim/pkg/dkim/internal/codec"
+	"github.com/rest-mail/go-dkim/pkg/dkim/internal/grammar"
 )
 
 var (
@@ -113,7 +116,7 @@ func TestSignAlgorithm(t *testing.T) {
 	headers, _ := SplitMessage([]byte(signed))
 	data := BuildSignedHeaders(tags["h"], headers[1:], headers[0], "relaxed")
 	sum := sha256.Sum256([]byte(data))
-	b, _ := decodeBase64Tag(tags["b"])
+	b, _ := codec.DecodeTag(tags["b"])
 	if err := rsa.VerifyPKCS1v15(&key.PublicKey, crypto.SHA256, sum[:], b); err != nil {
 		t.Errorf("b= is not PKCS#1 v1.5 over the SHA-256 hash: %v", err)
 	}
@@ -124,6 +127,7 @@ func TestSignAlgorithm(t *testing.T) {
 type fakeSigner struct{ pub crypto.PublicKey }
 
 func (f fakeSigner) Public() crypto.PublicKey { return f.pub }
+
 func (f fakeSigner) Sign(io.Reader, []byte, crypto.SignerOpts) ([]byte, error) {
 	return nil, io.ErrUnexpectedEOF
 }
@@ -178,7 +182,7 @@ func TestEd25519SignsHash(t *testing.T) {
 	headers, _ := SplitMessage([]byte(signed))
 	data := BuildSignedHeaders(tags["h"], headers[1:], headers[0], "relaxed")
 	sum := sha256.Sum256([]byte(data))
-	b, _ := decodeBase64Tag(tags["b"])
+	b, _ := codec.DecodeTag(tags["b"])
 	pub := edKey.Public().(ed25519.PublicKey)
 	if !ed25519.Verify(pub, sum[:], b) {
 		t.Error("b= is not an Ed25519 signature of the SHA-256 hash")
@@ -450,7 +454,7 @@ func TestSignRejectsBadOptions(t *testing.T) {
 	if _, err := Sign([]byte("To: b@example.test\r\n\r\nbody\r\n"), ok); err == nil || !strings.Contains(err.Error(), "no From") {
 		t.Errorf("message without From: %v", err)
 	}
-	if !validDNSName("xn--bcher-kva.example") || !validDNSName("_s1.sel-2") {
+	if !grammar.ValidDNSName("xn--bcher-kva.example") || !grammar.ValidDNSName("_s1.sel-2") {
 		t.Error("A-label names rejected")
 	}
 }

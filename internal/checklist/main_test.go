@@ -15,10 +15,26 @@ const tableHeader = "| ID | Section | Level | Requirement | Tests |\n|----|-----
 // counted in the denominator, and only validated test mappings in the numerator.
 func TestReadmeChecklistBadge(t *testing.T) {
 	root := filepath.Join("..", "..")
+	// This producer enforces the audited 95..100% gate across packages.
+	const auditedProducer = "rest-mail/go-spf/.github/workflows/rfc-verification.yml@2409e76ef1e501e0222e6c25a0c7a6202de1051b"
+	workflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(workflow), "uses: "+auditedProducer+"\n") {
+		t.Fatal("coverage gate producer needs re-audit")
+	}
 	file := filepath.Join(root, "CHECKLIST.md")
 	// The package directories CI passes to the checker (checklist-dirs in
 	// .github/workflows/ci.yml).
-	dirs := []string{filepath.Join(root, "pkg", "dkim"), filepath.Join(root, "pkg", "dkim", "internal", "idna")}
+	dirs := []string{
+		filepath.Join(root, "pkg", "dkim"),
+		filepath.Join(root, "pkg", "dkim", "internal", "codec"),
+		filepath.Join(root, "pkg", "dkim", "internal", "folding"),
+		filepath.Join(root, "pkg", "dkim", "internal", "grammar"),
+		filepath.Join(root, "pkg", "dkim", "internal", "idna"),
+		filepath.Join(root, "pkg", "dkim", "internal", "keyrecord"),
+	}
 	var out bytes.Buffer
 	if code := run(append([]string{"-file", file}, dirs...), &out, &out); code != 0 {
 		t.Fatalf("invalid repository checklist (exit %d):\n%s", code, out.String())
