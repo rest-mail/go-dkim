@@ -2,69 +2,13 @@ package dkim
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rsa"
 	"slices"
-	"sort"
 	"strings"
 	"testing"
-	"unicode"
 )
 
 // validResults are the six results Verify may report.
 var validResults = []string{ResultPass, ResultFail, ResultNeutral, ResultNone, ResultTempError, ResultPermError}
-
-// FuzzParseTagList checks the tag-list parsers on any input: neither panics; a
-// list the strict parser accepts has no whitespace but FWS, only valid names
-// and values, the lenient parser reads it the same way, and writing it back
-// out parses to the same tags.
-//
-// checklist: DKIM-TAG-01 DKIM-TAG-08 DKIM-VER-16
-func FuzzParseTagList(f *testing.F) {
-	for _, seed := range []string{
-		"v=1; a=rsa-sha256; d=example.com; s=sel; h=from:to; bh=AAAA; b=BBBB",
-		"v=DKIM1; k=ed25519; p=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
-		" a = b c ;\r\n\tb=x\r\n y ; c=", "a=1; a=2", "=x", "a", ";;", "1a=b", "a_1=b", "a=\x01", "a=b;", "i\f=1", "a=b;\v",
-	} {
-		f.Add(seed)
-	}
-	f.Fuzz(func(t *testing.T, s string) {
-		lenient := ParseTagList(s)
-		strict, err := ParseTagListStrict(s)
-		if err != nil {
-			return
-		}
-		for _, r := range s {
-			if unicode.IsSpace(r) && r != ' ' && r != '\t' && r != '\r' && r != '\n' {
-				t.Fatalf("accepted %q, which holds %U, whitespace that is not FWS", s, r)
-			}
-		}
-		keys := make([]string, 0, len(strict))
-		for k, v := range strict {
-			if !validTagName(k) || !validTagValue(v) || strings.Contains(v, ";") {
-				t.Fatalf("accepted tag %q=%q", k, v)
-			}
-			if lenient[k] != v {
-				t.Fatalf("lenient parse has %q=%q, strict %q", k, lenient[k], v)
-			}
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		var parts []string
-		for _, k := range keys {
-			parts = append(parts, k+"="+strict[k])
-		}
-		again, err := ParseTagListStrict(strings.Join(parts, "; "))
-		if err != nil || len(again) != len(strict) {
-			t.Fatalf("written back as %q: %v, %v", strings.Join(parts, "; "), again, err)
-		}
-		for k, v := range strict {
-			if again[k] != v {
-				t.Fatalf("tag %s: %q written back reads %q", k, v, again[k])
-			}
-		}
-	})
-}
 
 // FuzzSignatureHeader verifies a fixed message under any DKIM-Signature value,
 // with a valid key published: the verifier never panics, reports one of the
@@ -99,47 +43,6 @@ func FuzzSignatureHeader(f *testing.F) {
 			}
 			if _, err := ParseTagListStrict(value); err != nil && (r.Domain != "" || r.Selector != "") {
 				t.Fatalf("malformed tag-list reported d=%q s=%q", r.Domain, r.Selector)
-			}
-		}
-	})
-}
-
-// FuzzKeyRecord fetches a key from any key record: the verifier never panics,
-// and a key it accepts is well formed, an RSA key of at least 1024 bits or a
-// 32-byte Ed25519 key, from a record that is a valid tag-list.
-//
-// checklist: DKIM-KEY-14
-func FuzzKeyRecord(f *testing.F) {
-	for _, seed := range []string{
-		keyRecord(f, edKey), keyRecord(f, rsaKey(f, 1024)), "v=DKIM1; p=", "v=DKIM2; p=AAAA", "k=ed25519; p=AAAA",
-		"v=DKIM1; h=sha1; k=rsa; s=email:*; t=y:s; n=note; p=AAAA", "p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQ",
-	} {
-		f.Add(seed)
-	}
-	f.Fuzz(func(t *testing.T, rec string) {
-		resolver := func(context.Context, string) ([]string, error) { return []string{rec}, nil }
-		for _, keyType := range []string{"rsa", "ed25519"} {
-			pub, _, res := fetchKey(context.Background(), "s", "example.test", keyType, "sha256", resolver)
-			if res != "" {
-				if pub != nil || res != ResultPermError {
-					t.Fatalf("result %q with key %v", res, pub)
-				}
-				continue
-			}
-			if _, err := ParseTagListStrict(rec); err != nil {
-				t.Fatalf("key from a malformed record: %v", err)
-			}
-			switch k := pub.(type) {
-			case *rsa.PublicKey:
-				if keyType != "rsa" || k.N.BitLen() < 1024 {
-					t.Fatalf("accepted %d-bit RSA key for %s", k.N.BitLen(), keyType)
-				}
-			case ed25519.PublicKey:
-				if keyType != "ed25519" || len(k) != ed25519.PublicKeySize {
-					t.Fatalf("accepted %d-byte Ed25519 key for %s", len(k), keyType)
-				}
-			default:
-				t.Fatalf("key of type %T", pub)
 			}
 		}
 	})

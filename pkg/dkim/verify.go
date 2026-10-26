@@ -3,16 +3,15 @@ package dkim
 import (
 	"context"
 	"crypto"
-	"crypto/ed25519"
 	"crypto/rsa"
-	"crypto/x509"
-	"encoding/base64"
 	"fmt"
 	"net"
 	"strings"
 	"time"
 
-	"github.com/rest-mail/go-dkim/pkg/dkim/internal/idna"
+	"github.com/rest-mail/go-dkim/pkg/dkim/internal/codec"
+	"github.com/rest-mail/go-dkim/pkg/dkim/internal/grammar"
+	"github.com/rest-mail/go-dkim/pkg/dkim/internal/keyrecord"
 )
 
 // timeNow is the clock VerifySignature reads to decide whether a signature's x=
@@ -112,7 +111,7 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	if err != nil {
 		return VerifyResult{Result: ResultPermError, Reason: err.Error()}
 	}
-	aLabelTags(tags)
+	grammar.ALabelTags(tags)
 
 	res := VerifyResult{Domain: tags["d"], Selector: tags["s"]}
 	permfail := func(reason string) VerifyResult { res.Result = ResultPermError; res.Reason = reason; return res }
@@ -138,7 +137,7 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	// replayed under a new author — without breaking the signature, defeating
 	// DKIM's core guarantee. Per §6.1.1 the Verifier MUST ignore such a
 	// signature and return PERMFAIL (From field not signed).
-	if !headerListCoversFrom(tags["h"]) {
+	if !grammar.HeaderListCoversFrom(tags["h"]) {
 		return permfail("From field not signed (h= does not cover from)")
 	}
 
@@ -151,8 +150,8 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	// absent its default is "@"+d (§3.5), trivially aligned, so no check is
 	// needed.
 	if iTag, present := tags["i"]; present {
-		idomain, ok := identityDomain(iTag)
-		if !ok || !validDNSName(idomain) || !domainAligned(idomain, tags["d"]) {
+		idomain, ok := grammar.IdentityDomain(iTag)
+		if !ok || !grammar.ValidDNSName(idomain) || !grammar.DomainAligned(idomain, tags["d"]) {
 			return permfail(fmt.Sprintf("i= domain %q not aligned with d= domain %q", idomain, tags["d"]))
 		}
 	}
@@ -175,14 +174,14 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 		haveT bool
 	)
 	if tTag, present := tags["t"]; present {
-		tv, terr := parseTimeTag(tTag)
+		tv, terr := grammar.ParseTimeTag(tTag)
 		if terr != nil {
 			return permfail("invalid t= tag")
 		}
 		tVal, haveT = tv, true
 	}
 	if xTag, present := tags["x"]; present {
-		xVal, xerr := parseTimeTag(xTag)
+		xVal, xerr := grammar.ParseTimeTag(xTag)
 		if xerr != nil {
 			return permfail("invalid x= tag")
 		}
@@ -225,8 +224,8 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	// equals d exactly, so t=s is trivially satisfied and no check is needed.
 	if flags.NoSubdomain {
 		if iTag, present := tags["i"]; present {
-			idomain, _ := identityDomain(iTag)
-			if !strings.EqualFold(trimFWS(idomain), trimFWS(tags["d"])) {
+			idomain, _ := grammar.IdentityDomain(iTag)
+			if !strings.EqualFold(grammar.TrimFWS(idomain), grammar.TrimFWS(tags["d"])) {
 				return permfail(fmt.Sprintf("i= domain %q must equal d= domain %q exactly: key record forbids subdomaining (t=s)", idomain, tags["d"]))
 			}
 		}
@@ -262,7 +261,7 @@ func VerifySignatureBare(ctx context.Context, sig Header, allHeaders []Header, b
 	if err != nil {
 		return VerifyResult{Result: ResultPermError, Reason: err.Error()}
 	}
-	aLabelTags(tags)
+	grammar.ALabelTags(tags)
 	res, _ := verifyMechanism(ctx, tags, sig, allHeaders, body, resolver)
 	return res
 }
@@ -284,7 +283,7 @@ func VerifySignatureBareTags(ctx context.Context, tags map[string]string, sig He
 	for k, v := range tags {
 		own[k] = v
 	}
-	aLabelTags(own)
+	grammar.ALabelTags(own)
 	res, _ := verifyMechanism(ctx, own, sig, allHeaders, body, resolver)
 	return res
 }
@@ -334,19 +333,19 @@ func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, al
 
 	// Signing domain and selector (RFC 6376 §3.5): DNS names, internationalized
 	// ones as A-labels. U-labels, which RFC 8616 §5 allows, were converted by
-	// aLabelTags. Anything else cannot name a key record, and is not sent to the
+	// grammar.ALabelTags. Anything else cannot name a key record, and is not sent to the
 	// resolver.
-	if !validDNSName(tags["d"]) {
+	if !grammar.ValidDNSName(tags["d"]) {
 		return permfail("d= is not a DNS name in A-label form")
 	}
-	if !validDNSName(tags["s"]) {
+	if !grammar.ValidDNSName(tags["s"]) {
 		return permfail("s= is not a DNS name in A-label form")
 	}
 
 	// Query method (RFC 6376 §3.5): q= defaults to dns/txt, the only defined
 	// method. Unrecognized methods are ignored, so a q= listing no dns/txt
 	// leaves no way to fetch the key.
-	if q, ok := tags["q"]; ok && !listContains(q, "dns/txt") {
+	if q, ok := tags["q"]; ok && !grammar.ListContains(q, "dns/txt") {
 		return permfail("no supported key query method in q=" + q)
 	}
 
@@ -371,7 +370,7 @@ func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, al
 	// ── Body hash ────────────────────────────────────────────────────
 	canonBody := CanonicalizeBody(body, bodyCanon)
 	if l, present := tags["l"]; present {
-		n, err := parseUint(l)
+		n, err := grammar.ParseUint(l)
 		if err != nil {
 			return permfail("invalid l= tag")
 		}
@@ -381,7 +380,7 @@ func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, al
 		canonBody = canonBody[:n]
 	}
 	computedBH := HashBytes(hashType, []byte(canonBody))
-	expectedBH, err := decodeBase64Tag(tags["bh"])
+	expectedBH, err := codec.DecodeTag(tags["bh"])
 	if err != nil {
 		return permfail("invalid bh= base64")
 	}
@@ -394,13 +393,13 @@ func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, al
 	// ── Header hash / signature ──────────────────────────────────────
 	signedData := BuildSignedHeaders(tags["h"], allHeaders, sig, headerCanon)
 
-	sigBytes, err := decodeBase64Tag(tags["b"])
+	sigBytes, err := codec.DecodeTag(tags["b"])
 	if err != nil {
 		return permfail("invalid b= base64")
 	}
 
 	// ── Public key via DNS ───────────────────────────────────────────
-	pub, flags, kres := fetchKey(ctx, tags["s"], tags["d"], keyType, hashAlg, resolver)
+	pub, flags, kres := keyrecord.Fetch(ctx, tags["s"], tags["d"], keyType, hashAlg, resolver)
 	if kres != "" {
 		res.Result = kres
 		if kres == ResultTempError {
@@ -412,7 +411,7 @@ func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, al
 	}
 
 	hashed := HashBytes(hashType, []byte(signedData))
-	if !verifyHash(pub, hashed, sigBytes) {
+	if !keyrecord.VerifyHash(pub, hashed, sigBytes) {
 		res.Result = ResultFail
 		res.Reason = "signature verification failed"
 		return res, KeyFlags{}
@@ -420,63 +419,7 @@ func verifyMechanism(ctx context.Context, tags map[string]string, sig Header, al
 
 	res.Result = ResultPass
 	res.Reason = fmt.Sprintf("signature ok (d=%s s=%s)", tags["d"], tags["s"])
-	return res, flags
-}
-
-// headerListCoversFrom reports whether a signature's h= tag (a colon-separated
-// list of header field names) includes the From field, matched
-// case-insensitively and ignoring whitespace around each name. RFC 6376 §5.4
-// makes From mandatory in h=; §6.1.1 requires PERMFAIL when it is absent.
-func headerListCoversFrom(hTag string) bool {
-	for _, name := range strings.Split(hTag, ":") {
-		if strings.EqualFold(trimFWS(name), "from") {
-			return true
-		}
-	}
-	return false
-}
-
-// aLabelTags rewrites the U-labels of d=, s= and the i= domain in tags to
-// A-labels (RFC 8616 §5). Every later check, the alignment comparisons and the
-// key record name then see one form, while the header hash still covers the
-// field text exactly as it occurs in sig. The i= local-part, which RFC 8616
-// lets carry UTF-8, is kept as it is.
-func aLabelTags(tags map[string]string) {
-	for _, k := range []string{"d", "s"} {
-		if v, ok := tags[k]; ok {
-			tags[k] = idna.ToALabels(v)
-		}
-	}
-	if iTag, ok := tags["i"]; ok {
-		if at := strings.LastIndexByte(iTag, '@'); at >= 0 {
-			tags["i"] = iTag[:at+1] + idna.ToALabels(iTag[at+1:])
-		}
-	}
-}
-
-// identityDomain returns the domain part of a DKIM i= (AUID) tag value: the
-// text after the LAST "@". RFC 6376 §3.5 defines i= as [ Local-part ] "@"
-// domain-name, and the local part may be a quoted string that itself contains
-// "@", so the split is on the last "@". A value with no "@" is malformed and
-// yields ("", false).
-func identityDomain(iTag string) (string, bool) {
-	at := strings.LastIndexByte(iTag, '@')
-	if at < 0 {
-		return "", false
-	}
-	return iTag[at+1:], true
-}
-
-// domainAligned reports whether the i= domain idomain is the same as, or a
-// subdomain of, the signing domain d (RFC 6376 §6.1.1), compared
-// case-insensitively. An empty idomain or d is never aligned.
-func domainAligned(idomain, d string) bool {
-	idomain = strings.ToLower(trimFWS(idomain))
-	d = strings.ToLower(trimFWS(d))
-	if idomain == "" || d == "" {
-		return false
-	}
-	return idomain == d || strings.HasSuffix(idomain, "."+d)
+	return res, KeyFlags(flags)
 }
 
 // KeyFlags carries the policy-bearing tags of the DKIM key record the verifier
@@ -500,17 +443,6 @@ type KeyFlags struct {
 	NotForEmail bool
 }
 
-// parseKeyFlags reads a DKIM key record's t= tag — a colon-separated list of
-// flags, RFC 6376 §3.6.1, e.g. "y:s" — into a KeyFlags. Flag names are matched
-// case-sensitively (§3.2) with the folding whitespace the ABNF permits around
-// each ":" ignored; unrecognized flags (e.g. "y", testing mode, which the verifier
-// does not act on here) are ignored per §3.6.1.
-func parseKeyFlags(tTag string) KeyFlags {
-	var f KeyFlags
-	f.NoSubdomain = listContains(tTag, "s")
-	return f
-}
-
 // FetchKey resolves and parses a signer's RSA public key from its DKIM key
 // record at <selector>._domainkey.<domain>, for an rsa-sha256 signature such as
 // an ARC-Seal. hashAlg is the hash half of the verifying signature's a= tag
@@ -523,187 +455,11 @@ func parseKeyFlags(tTag string) KeyFlags {
 // DNS failure) or ResultPermError (missing, revoked, malformed, or
 // hash-algorithm-disallowed key).
 func FetchKey(ctx context.Context, selector, domain, hashAlg string, resolver TXTResolver) (*rsa.PublicKey, KeyFlags, string) {
-	pub, flags, res := fetchKey(ctx, selector, domain, "rsa", hashAlg, resolver)
+	pub, flags, res := keyrecord.Fetch(ctx, selector, domain, "rsa", hashAlg, resolver)
 	if res != "" {
-		return nil, flags, res
+		return nil, KeyFlags(flags), res
 	}
-	return pub.(*rsa.PublicKey), flags, ""
-}
-
-// fetchKey resolves the key record at <selector>._domainkey.<domain> and
-// returns the first usable key of keyType ("rsa" or "ed25519"): an
-// *rsa.PublicKey of at least 1024 bits or an ed25519.PublicKey.
-func fetchKey(ctx context.Context, selector, domain, keyType, hashAlg string, resolver TXTResolver) (crypto.PublicKey, KeyFlags, string) {
-	name := RecordName(selector, domain)
-	records, err := resolver(ctx, name)
-	if err != nil {
-		var dnsErr *net.DNSError
-		if ok := asDNSError(err, &dnsErr); ok && dnsErr.IsNotFound {
-			return nil, KeyFlags{}, ResultPermError
-		}
-		return nil, KeyFlags{}, ResultTempError
-	}
-	for _, rec := range records {
-		// A key record whose tag-list repeats a tag name (or carries a malformed
-		// segment) is invalid per RFC 6376 §3.2; skip it rather than resolve, say,
-		// a duplicate p= to one of its values. If no valid record remains, the
-		// caller returns PERMFAIL (no usable key).
-		kt, err := ParseTagListStrict(rec)
-		if err != nil {
-			continue
-		}
-		// RFC 6376 §3.6.1 / §6.1.2: the key record's v= tag is the key-record
-		// version (default "DKIM1"). When present it MUST equal "DKIM1"
-		// (case-sensitive) AND MUST be the first tag in the record; a record
-		// advertising any other version (e.g. v=DKIM2) or one whose v= is present
-		// but not first MUST be treated as though it does not exist — skip it so the
-		// caller PERMFAILs when no other record is usable. This blocks a domain's
-		// future or parallel key scheme from being silently honored under DKIM1
-		// rules. An ABSENT v= is permitted and defaults to DKIM1, so its absence
-		// must NOT reject the record. (This is the DNS KEY record's v=, distinct
-		// from the DKIM-Signature header's v= enforced at §3.5.)
-		if v, ok := kt["v"]; ok && (v != "DKIM1" || firstTagName(rec) != "v") {
-			continue
-		}
-		// RFC 6376 §3.6.1 / §6.1.2: the key record's h= tag, when present, lists
-		// the hash algorithms the domain permits with this key. If the signature's
-		// hash algorithm (hashAlg, the hash half of its a= tag) is not among them,
-		// this record MUST be ignored — skip it so the caller PERMFAILs when no
-		// other record permits the algorithm. This closes an algorithm-downgrade
-		// acceptance avenue whereby a key the domain published for one hash is used
-		// to accept a signature under an algorithm it never authorized. An h= tag
-		// present but empty lists nothing acceptable, so it too excludes the key.
-		if _, ok := kt["h"]; ok && !keyRecordAllowsHash(kt["h"], hashAlg) {
-			continue
-		}
-		if kt["p"] == "" {
-			continue // revoked or malformed
-		}
-		// k= defaults to "rsa" (§3.6.1). A key of another type than the
-		// signature's a= names is not suitable for it (§6.1.2), and an
-		// unrecognized type is ignored; either way the record is skipped.
-		k, ok := kt["k"]
-		if !ok {
-			k = "rsa"
-		}
-		if k != keyType {
-			continue
-		}
-		der, derr := decodeBase64Tag(kt["p"])
-		if derr != nil {
-			continue
-		}
-		pub := parsePublicKey(k, der)
-		if pub == nil {
-			continue
-		}
-		flags := parseKeyFlags(kt["t"])
-		// RFC 6376 §3.6.1: the key record's s= tag, when present, lists the
-		// service types this key may be used for (default "*", all services). A
-		// list naming neither "email" nor the wildcard "*" bars the key from
-		// verifying an email signature; record that so VerifySignature PERMFAILs.
-		// Absent s= leaves the default (all services), so the key stays usable.
-		if s, ok := kt["s"]; ok && !keyRecordAllowsService(s) {
-			flags.NotForEmail = true
-		}
-		return pub, flags, ""
-	}
-	return nil, KeyFlags{}, ResultPermError
-}
-
-// parsePublicKey decodes the p= data of a key record of type k, or returns nil
-// when it is not a usable key of that type.
-//
-// For "rsa", RFC 6376 §3.6.1 names an RSAPublicKey, but its own example
-// (Appendix C) and nearly every published record carry a SubjectPublicKeyInfo,
-// so both are accepted. A key shorter than 1024 bits is not usable (RFC 8301
-// §3.2). For "ed25519", p= is the raw 32-byte public key (RFC 8463 §4.2).
-func parsePublicKey(k string, der []byte) crypto.PublicKey {
-	if k == "ed25519" {
-		if len(der) != ed25519.PublicKeySize {
-			return nil
-		}
-		return ed25519.PublicKey(der)
-	}
-	var key *rsa.PublicKey
-	if pub, err := x509.ParsePKIXPublicKey(der); err == nil {
-		key, _ = pub.(*rsa.PublicKey)
-	} else if pub, err := x509.ParsePKCS1PublicKey(der); err == nil {
-		key = pub
-	}
-	if key == nil || key.N.BitLen() < minRSABits {
-		return nil
-	}
-	return key
-}
-
-// verifyHash checks sig over the SHA-256 hash of the signed data with pub, an
-// RSA key (PKCS#1 v1.5, RFC 6376 §3.3.2) or an Ed25519 key (PureEdDSA over the
-// hash, RFC 8463 §3).
-func verifyHash(pub crypto.PublicKey, hashed, sig []byte) bool {
-	if k, ok := pub.(ed25519.PublicKey); ok {
-		return ed25519.Verify(k, hashed, sig)
-	}
-	return rsa.VerifyPKCS1v15(pub.(*rsa.PublicKey), crypto.SHA256, hashed, sig) == nil
-}
-
-// firstTagName returns the name of the first tag in a DKIM tag-list record (the
-// text before the first "="), ignoring the ABNF's optional leading folding
-// whitespace and any empty leading segments (a stray leading ";" or surrounding
-// FWS). It returns "" for a record with no tag. It is used to enforce RFC 6376
-// §3.6.1's requirement that a key record's v= tag, when present, be the FIRST
-// tag in the record.
-func firstTagName(rec string) string {
-	for _, seg := range strings.Split(rec, ";") {
-		if trimFWS(seg) == "" {
-			continue
-		}
-		eq := strings.IndexByte(seg, '=')
-		if eq < 0 {
-			return ""
-		}
-		return trimFWS(seg[:eq])
-	}
-	return ""
-}
-
-// keyRecordAllowsHash reports whether a DKIM key record's h= tag value (hTag) —
-// a colon-separated list of acceptable hash algorithm names, RFC 6376 §3.6.1 —
-// permits the hash algorithm named hashAlg ("sha256", the hash half of the
-// signature's a= tag). Names are matched case-sensitively (§3.2) with the
-// folding whitespace §3.6.1 allows around each ":" ignored; an unrecognized
-// name in the list simply does not match (§3.6.1: "Unrecognized algorithms MUST
-// be ignored"). It reports only list membership: whether the h= tag is present
-// at all (absent = no restriction) is the caller's decision, so an empty hTag —
-// a list with no members — returns false here.
-func keyRecordAllowsHash(hTag, hashAlg string) bool {
-	return listContains(hTag, hashAlg)
-}
-
-// listContains reports whether the colon-separated tag value list has an
-// element equal to want, ignoring the folding whitespace allowed around each
-// ":". Values are case-sensitive (RFC 6376 §3.2).
-func listContains(list, want string) bool {
-	for _, v := range strings.Split(list, ":") {
-		if trimFWS(v) == want {
-			return true
-		}
-	}
-	return false
-}
-
-// keyRecordAllowsService reports whether a DKIM key record's s= tag value (sTag)
-// — a colon-separated list of the service types the key may be used for, RFC 6376
-// §3.6.1 — permits the "email" service: the list contains either "email" or the
-// wildcard "*". Names are matched case-sensitively (§3.2) with the folding
-// whitespace §3.6.1 allows around each ":" ignored; any other service type in the list is
-// simply not a match (§3.6.1: unrecognized service types are ignored, not an
-// error), so a list like "email:tlsa" permits email on the strength of its
-// "email" entry. It reports only list membership: whether the s= tag is present
-// at all (absent = default "*", all services) is the caller's decision, so an
-// empty sTag — a list with no members — returns false here.
-func keyRecordAllowsService(sTag string) bool {
-	return listContains(sTag, "email") || listContains(sTag, "*")
+	return pub.(*rsa.PublicKey), KeyFlags(flags), ""
 }
 
 // BuildSignedHeaders assembles the canonicalized header block that a signature's
@@ -731,7 +487,7 @@ func BuildSignedHeaders(hTag string, allHeaders []Header, sig Header, canon stri
 	consumed := map[string]int{}
 	var b strings.Builder
 	for _, name := range strings.Split(hTag, ":") {
-		name = trimFWS(name)
+		name = grammar.TrimFWS(name)
 		if name == "" {
 			continue
 		}
@@ -754,29 +510,6 @@ func BuildSignedHeaders(hTag string, allHeaders []Header, sig Header, canon stri
 	}
 	b.WriteString(CanonicalizeHeader(stripped, canon))
 	return b.String()
-}
-
-// decodeBase64Tag decodes a DKIM base64 tag value (b=, bh=, key p=) tolerantly,
-// per RFC 6376 §2.10 / §3.5. Two allowances of the base64string ABNF are honored
-// that strict base64.StdEncoding does not:
-//
-//   - Folding whitespace (FWS) may appear within the value (it is commonly folded
-//     across lines), so all embedded SP/TAB/CR/LF are stripped first.
-//   - The trailing "=" padding is OPTIONAL, and some conformant signers and key
-//     records emit unpadded base64. StdEncoding rejects any input whose length is
-//     not a multiple of four, so an unpadded value is spuriously rejected.
-//
-// Standard (padded) decoding is tried first so canonical inputs take the exact
-// prior path; only on failure is the value normalized — any stray padding removed
-// — and retried with the raw (unpadded) alphabet. A value that decodes under
-// either form is accepted; one that decodes under neither (genuinely invalid
-// base64) still returns an error and is rejected by the caller.
-func decodeBase64Tag(s string) ([]byte, error) {
-	s = StripWSP(s)
-	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
-		return b, nil
-	}
-	return base64.RawStdEncoding.DecodeString(strings.TrimRight(s, "="))
 }
 
 // nthFromBottom returns the nth (0-based) instance of the named header counting

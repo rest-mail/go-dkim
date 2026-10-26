@@ -9,6 +9,8 @@ import (
 	"encoding/pem"
 	"fmt"
 	"strings"
+
+	"github.com/rest-mail/go-dkim/pkg/dkim/internal/keyrecord"
 )
 
 // DefaultSelector is the selector RecordName and RecordFragment fall back to
@@ -42,10 +44,7 @@ func GenerateKey(bits int) (privatePEM, publicPEM string, err error) {
 
 // RecordName returns the DKIM record name <selector>._domainkey.<domain>.
 func RecordName(selector, domain string) string {
-	if selector == "" {
-		selector = DefaultSelector
-	}
-	return selector + "._domainkey." + domain
+	return keyrecord.RecordName(selector, domain)
 }
 
 // RecordValue renders the DKIM DNS TXT value from a PEM-encoded public key (a

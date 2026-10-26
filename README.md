@@ -47,6 +47,10 @@ The module declares go 1.25.
 | Import path | What it holds |
 |-------------|---------------|
 | `github.com/rest-mail/go-dkim/pkg/dkim` | Signing and verifying: `Sign`, `SignOptions`, `DefaultSignedHeaders`, `DefaultOversignedHeaders`, `ParsePrivateKey`, `Verify`, `VerifyResult`, the `Result*` values and `TXTResolver`; the single-signature and canonicalization primitives (`Header`, `SplitMessage`, `CanonicalizeHeader`, `CanonicalizeBody`, `BuildSignedHeaders`, `VerifySignature`, `VerifySignatureBare`, `VerifySignatureBareTags`, `FetchKey`, `KeyFlags`, `ParseTagList`, `ParseTagListStrict`, `RemoveBValue`, `StripWSP`, `HashBytes`); and the key helpers `GenerateKey`, `RecordName`, `RecordValue`, `RecordFragment` and `DefaultSelector`. |
+| `pkg/dkim/internal/grammar` | Tag-list and numeric grammar, field/DNS names and identity alignment. Internal: not importable by callers. |
+| `pkg/dkim/internal/codec` | Folding-whitespace and base64 codecs. Internal: not importable by callers. |
+| `pkg/dkim/internal/folding` | DKIM signature value folding. Internal: not importable by callers. |
+| `pkg/dkim/internal/keyrecord` | DNS key-record parsing, policy flags and signature crypto. Internal: not importable by callers. |
 | `pkg/dkim/internal/idna` | Converts U-labels to A-labels (lower-casing and RFC 3492 punycode) for RFC 8616 names. Internal: not importable. |
 
 Upgrading from v0.4 or earlier: the root package is gone. Import
@@ -307,7 +311,7 @@ The host:
 and RFC 8616 §5 place on a signer and a verifier, item by item, each mapped to
 the tests that prove it. Rows the library does not meet, or that belong to the
 host or the DNS publisher, are `n/a` with the reason. The tests sit beside the
-code in [`pkg/dkim`](pkg/dkim) and [`pkg/dkim/internal/idna`](pkg/dkim/internal/idna).
+code in [`pkg/dkim`](pkg/dkim) and its focused `internal` packages listed above.
 
 The checklist is a Markdown file holding one or more tables whose header is
 exactly:
@@ -351,7 +355,9 @@ in CI. It is the same program as the other `go-*` libraries'.
 - a `Test` or `Fuzz` function names no item (`Example` functions may).
 
 ```sh
-go run ./internal/checklist ./pkg/dkim ./pkg/dkim/internal/idna
+go run ./internal/checklist ./pkg/dkim ./pkg/dkim/internal/codec \
+  ./pkg/dkim/internal/folding ./pkg/dkim/internal/grammar \
+  ./pkg/dkim/internal/idna ./pkg/dkim/internal/keyrecord
 ```
 
 The RFCs' own examples are tests: RFC 8463's Appendix A message, whose Ed25519
@@ -406,29 +412,38 @@ coverage in its `RFC proof` log. Lines left uncovered on purpose are listed,
 each with a reason, in [COVERAGE.md](COVERAGE.md).
 
 CI runs go-spf's reusable
-[`rfc-verification.yml`](https://github.com/rest-mail/go-spf/blob/7d291c08d310b9c62afc287e75a534a39150fafb/.github/workflows/rfc-verification.yml),
+[`rfc-verification.yml`](https://github.com/rest-mail/go-spf/blob/2409e76ef1e501e0222e6c25a0c7a6202de1051b/.github/workflows/rfc-verification.yml),
 pinned to that commit: build, vet, golangci-lint, race tests with at least 95%
-statement coverage, the checklist and 30 seconds of each fuzz target. The
-required `Build & Test` check passes only when it and the workflow fixtures
+statement coverage measured across packages with `-coverpkg=./...`, the checklist
+and 30 seconds of each fuzz target. The required `Build & Test` check passes
+only when it and the workflow fixtures
 both succeed. Locally:
 
 ```sh
-go test -race ./...                                       # all tests, no network
-go run ./internal/checklist ./pkg/dkim ./pkg/dkim/internal/idna
+go test -race -coverpkg=./... ./...                      # all tests, no network
+go run ./internal/checklist ./pkg/dkim ./pkg/dkim/internal/codec \
+  ./pkg/dkim/internal/folding ./pkg/dkim/internal/grammar \
+  ./pkg/dkim/internal/idna ./pkg/dkim/internal/keyrecord
 go test -run='^$' -fuzz='^FuzzSignVerify$' -fuzztime=30s ./pkg/dkim
 python3 -m unittest discover -s .github/tests            # what CI passes the shared proof
 ```
 
-Five fuzz targets run in CI, all in `pkg/dkim`: `FuzzParseTagList` (tag-lists),
-`FuzzSignatureHeader` (verifying any DKIM-Signature field), `FuzzKeyRecord` (key
-records), `FuzzCanonicalization` (properties such as relaxed canonicalization
-being idempotent) and `FuzzSignVerify` (anything signed verifies). Their seeds
-are in the targets, and inputs that once failed are kept in
-`pkg/dkim/testdata/fuzz`.
+Five fuzz targets run in CI: `FuzzParseTagList` in `pkg/dkim/internal/grammar`
+(tag-lists), `FuzzKeyRecord` in `pkg/dkim/internal/keyrecord` (key records), and
+three in `pkg/dkim`: `FuzzSignatureHeader` (verifying any DKIM-Signature field),
+`FuzzCanonicalization` (properties such as relaxed canonicalization being
+idempotent) and `FuzzSignVerify` (anything signed verifies). Their seeds are in
+the targets; regression inputs belong in each target package's `testdata/fuzz`.
 
 ## Changelog
 
 Recent releases; see [CHANGELOG.md](CHANGELOG.md) for the complete history.
+
+### v0.5.1 (2026-10-26)
+
+Split grammar, codecs, signature folding and key-record helpers into internal
+packages. The public API is unchanged. CI's RFC proof measures coverage across
+packages with `-coverpkg`.
 
 ### v0.5.0 (2026-10-26)
 
@@ -478,10 +493,6 @@ A non-digit `l=` is refused, fixing a remotely triggerable panic.
 ### v0.1.1 (2026-07-23)
 
 The module path is `github.com/rest-mail/go-dkim`.
-
-### v0.1.0 (2026-07-23)
-
-First release: RFC 6376 signing and verification, standard library only.
 
 ## Licence
 

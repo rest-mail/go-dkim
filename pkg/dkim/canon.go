@@ -5,13 +5,10 @@ import (
 	"crypto"
 	"crypto/sha1" //nolint:gosec // rsa-sha1 is a legacy DKIM algorithm receivers must still verify
 	"crypto/sha256"
-	"errors"
-	"fmt"
-	"net"
-	"strconv"
 	"strings"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/rest-mail/go-dkim/pkg/dkim/internal/codec"
+	"github.com/rest-mail/go-dkim/pkg/dkim/internal/grammar"
 )
 
 // SplitMessage normalizes line endings to CRLF and splits a raw RFC 5322
@@ -63,7 +60,7 @@ func parseHeaders(block string) []Header {
 		}
 		name, value, ok := strings.Cut(line, ":")
 		name = strings.TrimRight(name, " \t")
-		if skipping = !ok || !validFieldName(name); skipping {
+		if skipping = !ok || !grammar.ValidFieldName(name); skipping {
 			continue // not a valid header field
 		}
 		headers = append(headers, Header{Name: name, Value: value, Raw: line})
@@ -156,24 +153,12 @@ func relaxBodyLine(line string) string {
 }
 
 // ParseTagList parses a DKIM tag=value list ("k=v; k2=v2") into a map. Keys and
-// the ends of values are trimmed of folding whitespace (see trimFWS) and
+// the ends of values are trimmed of folding whitespace (SP, HTAB, CR, LF) and
 // nothing else; internal FWS in values is preserved (callers strip it via
 // StripWSP where it is insignificant, e.g. b=, bh=, p=). It parses
 // DKIM-Signature, DKIM key records, and ARC header (i=, cv=, …) tag lists alike.
 func ParseTagList(s string) map[string]string {
-	out := map[string]string{}
-	for _, seg := range strings.Split(s, ";") {
-		eq := strings.IndexByte(seg, '=')
-		if eq < 0 {
-			continue
-		}
-		key := trimFWS(seg[:eq])
-		if key == "" {
-			continue
-		}
-		out[key] = trimFWS(seg[eq+1:])
-	}
-	return out
+	return grammar.ParseTagList(s)
 }
 
 // ParseTagListStrict parses a DKIM tag=value list like ParseTagList but enforces
@@ -199,85 +184,7 @@ func ParseTagList(s string) map[string]string {
 // DKIM-Signature or a DNS key record can PERMFAIL (or skip the record) rather
 // than resolve a malformed list to an arbitrary value.
 func ParseTagListStrict(s string) (map[string]string, error) {
-	if r, ok := nonFWSSpace(s); ok {
-		return nil, fmt.Errorf("tag-list contains %q (%U), whitespace that is not folding whitespace", r, r)
-	}
-	out := map[string]string{}
-	for _, seg := range strings.Split(s, ";") {
-		eq := strings.IndexByte(seg, '=')
-		if eq < 0 {
-			if trimFWS(seg) == "" {
-				continue // empty segment: trailing ";" or surrounding FWS
-			}
-			return nil, fmt.Errorf("malformed tag-list segment %q (missing '=')", trimFWS(seg))
-		}
-		key := trimFWS(seg[:eq])
-		if !validTagName(key) {
-			return nil, fmt.Errorf("malformed tag name %q in tag-list", key)
-		}
-		if _, dup := out[key]; dup {
-			return nil, fmt.Errorf("duplicate tag %q in tag-list", key)
-		}
-		val := trimFWS(seg[eq+1:])
-		if !validTagValue(val) {
-			return nil, fmt.Errorf("malformed value for tag %q in tag-list", key)
-		}
-		out[key] = val
-	}
-	return out, nil
-}
-
-// fws holds the characters of folding whitespace, the only whitespace RFC 6376
-// allows around tag names, "=", values, ";" (§3.2) and the ":" of a list such
-// as h= (§3.5, §3.6.1): the SP and HTAB of WSP and the CR and LF of a fold (RFC
-// 5322 §3.2.2). strings.TrimSpace is wrong for wire data: it also strips a form
-// feed, a vertical tab, U+0085 and U+00A0, which are not whitespace there.
-const fws = " \t\r\n"
-
-// trimFWS removes the folding whitespace around s, and nothing else.
-func trimFWS(s string) string { return strings.Trim(s, fws) }
-
-// nonFWSSpace returns the first rune in s that Unicode counts as whitespace but
-// folding whitespace does not ("\f", "\v", U+0085, U+00A0, ...), and whether
-// there is one.
-func nonFWSSpace(s string) (rune, bool) {
-	for _, r := range s {
-		if unicode.IsSpace(r) && !strings.ContainsRune(fws, r) {
-			return r, true
-		}
-	}
-	return 0, false
-}
-
-// validTagName reports whether name matches the RFC 6376 §3.2 tag-name ABNF,
-// ALPHA *ALNUMPUNC, where ALNUMPUNC is a letter, a digit or "_".
-func validTagName(name string) bool {
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		if !isAlpha(c) && (i == 0 || !isDigit(c) && c != '_') {
-			return false
-		}
-	}
-	return name != ""
-}
-
-func isAlpha(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
-func isDigit(c byte) bool { return c >= '0' && c <= '9' }
-
-// validTagValue reports whether a trimmed tag value holds only the RFC 6376
-// §3.2 tag-value characters: VALCHAR (printable US-ASCII except ";") and the
-// whitespace of FWS between them. RFC 8616 §5 adds UTF-8 for internationalized
-// headers (U-labels in d=, s= and i=, UTF-8 in the i= local-part and
-// dkim-safe-char), so well-formed non-ASCII UTF-8 is accepted too; invalid
-// UTF-8 is not.
-func validTagValue(val string) bool {
-	for i := 0; i < len(val); i++ {
-		c := val[i]
-		if (c < 0x21 || c > 0x7e) && c != ' ' && c != '\t' && c != '\r' && c != '\n' && c < 0x80 {
-			return false
-		}
-	}
-	return utf8.ValidString(val)
+	return grammar.ParseTagListStrict(s)
 }
 
 // RemoveBValue blanks the value of the b= tag in a signature field (a
@@ -301,7 +208,7 @@ func RemoveBValue(field string) string {
 		}
 		// Tag names are case-sensitive (RFC 6376 §3.2): "B=" is an unknown tag,
 		// hashed as it is, not the signature.
-		if eq := strings.IndexByte(seg, '='); eq >= 0 && trimFWS(seg[:eq]) == "b" {
+		if eq := strings.IndexByte(seg, '='); eq >= 0 && grammar.TrimFWS(seg[:eq]) == "b" {
 			b.WriteString(seg[:eq+1]) // keep "b=", drop the value
 		} else {
 			b.WriteString(seg)
@@ -316,13 +223,7 @@ func RemoveBValue(field string) string {
 // StripWSP removes all whitespace (SP, TAB, CR, LF) — used on base64 tag values
 // (b=, bh=, p=) that may be folded across lines.
 func StripWSP(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case ' ', '\t', '\r', '\n':
-			return -1
-		}
-		return r
-	}, s)
+	return codec.StripWSP(s)
 }
 
 // HashBytes hashes data with the given hash (crypto.SHA256 or crypto.SHA1, the
@@ -337,45 +238,3 @@ func HashBytes(h crypto.Hash, data []byte) []byte {
 }
 
 func bytesEqual(a, b []byte) bool { return bytes.Equal(a, b) }
-
-// parseUint parses a DKIM tag value that RFC 6376 defines as digits only (e.g.
-// the l= body-length tag, sig-l-tag = ... 1*76DIGIT — §3.5). It rejects any
-// value that is not composed solely of ASCII digits, including a leading "+" or
-// "-" sign. This matters: strconv.Atoi accepts a sign, so without this guard a
-// negative l= would parse cleanly and then slice the body with a negative bound
-// (canonBody[:-1]), panicking — a remotely triggerable crash since the
-// signature header is attacker-controlled. strconv.Atoi still rejects values
-// that overflow int; the grammar also limits the value to 1–76 digits.
-func parseUint(s string) (int, error) {
-	if len(s) == 0 || len(s) > 76 {
-		return 0, strconv.ErrSyntax
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return 0, strconv.ErrSyntax
-		}
-	}
-	return strconv.Atoi(s)
-}
-
-// parseTimeTag parses a DKIM timestamp tag (t= or x=), whose RFC 6376 §3.5 ABNF
-// is 1*12DIGIT — an unsigned decimal count of seconds since the Unix epoch. It
-// rejects an empty value, any non-digit (including a leading "+" or "-" sign),
-// and a value longer than 12 digits, so a syntactically invalid expiration is a
-// clean error rather than being silently ignored. The result is returned as
-// int64 so the epoch-second comparison against the current time is correct on a
-// 32-bit platform (where int would overflow beyond year 2038).
-func parseTimeTag(s string) (int64, error) {
-	s = trimFWS(s)
-	if s == "" || len(s) > 12 {
-		return 0, strconv.ErrSyntax
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return 0, strconv.ErrSyntax
-		}
-	}
-	return strconv.ParseInt(s, 10, 64)
-}
-
-func asDNSError(err error, target **net.DNSError) bool { return errors.As(err, target) }

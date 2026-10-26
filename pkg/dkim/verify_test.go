@@ -63,8 +63,6 @@ func TestBodyCanon_Empty(t *testing.T) {
 	}
 }
 
-// ── removeBValue ─────────────────────────────────────────────────────────
-
 // checklist: DKIM-SIG-01 DKIM-HASH-04
 func TestRemoveBValue(t *testing.T) {
 	in := "v=1; a=rsa-sha256; bh=ABC; h=from:to; b=SIGDATA=="
@@ -79,8 +77,6 @@ func TestRemoveBValue(t *testing.T) {
 		t.Errorf("removeBValue mid: got %q want %q", got, want2)
 	}
 }
-
-// ── Sign/verify round-trip ──────────────────────────────────────────────
 
 // signTestMessage is an independent reference signer used only by tests: it
 // assembles a DKIM-Signature over the given header fields + body and returns a
@@ -362,8 +358,6 @@ func TestVerify_BodyLengthExceedsBody(t *testing.T) {
 	}
 }
 
-// ── d=/i= identity alignment (RFC 6376 §6.1.1 / §3.5) ────────────────────
-
 // signWithIdentity signs a message exactly like signTestMessage (relaxed/
 // relaxed) but adds an explicit i= (AUID) tag to the signature — the tag is
 // part of the signed data, so the resulting signature verifies as far as the
@@ -467,53 +461,6 @@ func TestVerify_AlignedIdentityVerifies(t *testing.T) {
 		})
 	}
 }
-
-// TestDomainAligned pins the alignment predicate directly: equality and true
-// subdomains (on a dot boundary) align; unrelated domains, a bare suffix that
-// is not on a dot boundary, and empty inputs do not. Comparison is
-// case-insensitive.
-//
-// checklist: DKIM-SIG-07
-func TestDomainAligned(t *testing.T) {
-	cases := []struct {
-		idomain, d string
-		want       bool
-	}{
-		{"example.test", "example.test", true},
-		{"sub.example.test", "example.test", true},
-		{"deep.sub.example.test", "example.test", true},
-		{"EXAMPLE.test", "example.TEST", true},
-		{"evil.example", "example.test", false},
-		{"example.test.evil.example", "example.test", false}, // d= is a prefix, not a parent
-		{"notexample.test", "example.test", false},           // suffix but not on a dot boundary
-		{"", "example.test", false},
-		{"example.test", "", false},
-	}
-	for _, c := range cases {
-		if got := domainAligned(c.idomain, c.d); got != c.want {
-			t.Errorf("domainAligned(%q,%q)=%v want %v", c.idomain, c.d, got, c.want)
-		}
-	}
-}
-
-// TestIdentityDomain pins the i= domain extraction: the domain is everything
-// after the LAST "@" (a quoted local part may itself contain "@"), and a value
-// with no "@" is malformed.
-//
-// checklist: DKIM-SIG-07
-func TestIdentityDomain(t *testing.T) {
-	if d, ok := identityDomain("user@example.test"); !ok || d != "example.test" {
-		t.Errorf("identityDomain simple: got %q,%v", d, ok)
-	}
-	if d, ok := identityDomain(`"weird@local"@example.test`); !ok || d != "example.test" {
-		t.Errorf("identityDomain last-@: got %q,%v", d, ok)
-	}
-	if _, ok := identityDomain("no-at-sign"); ok {
-		t.Error("i= without @ should be reported malformed")
-	}
-}
-
-// ── From must be signed (RFC 6376 §5.4 / §6.1.1) ─────────────────────────
 
 // signOmittingFrom signs a message (relaxed/relaxed) whose h= tag deliberately
 // omits the From field even though the message carries a From header. The
@@ -621,32 +568,6 @@ func TestVerify_FromSignedVerifies(t *testing.T) {
 		t.Fatalf("want pass with From in h=, got %+v", r)
 	}
 }
-
-// TestHeaderListCoversFrom pins the h= coverage predicate directly: from is
-// matched case-insensitively and ignoring surrounding whitespace; a list that
-// never names from (or an empty list) is not covered.
-//
-// checklist: DKIM-VER-07
-func TestHeaderListCoversFrom(t *testing.T) {
-	cases := []struct {
-		hTag string
-		want bool
-	}{
-		{"from:to:subject", true},
-		{"to:from:date", true},
-		{"to:subject: From ", true}, // whitespace + uppercase
-		{"to:subject:date", false},
-		{"fromish:to", false}, // substring but not the field
-		{"", false},
-	}
-	for _, c := range cases {
-		if got := headerListCoversFrom(c.hTag); got != c.want {
-			t.Errorf("headerListCoversFrom(%q)=%v want %v", c.hTag, got, c.want)
-		}
-	}
-}
-
-// ── Duplicate tags invalidate the tag-list (RFC 6376 §3.2) ───────────────
 
 // signWithDuplicateTag signs a message (relaxed/relaxed) whose DKIM-Signature
 // value carries the SAME tag name twice. The signature is computed over the
@@ -757,8 +678,6 @@ func TestVerify_DuplicateTagInKeyRecordRejected(t *testing.T) {
 	}
 }
 
-// ── Key-record h= acceptable hash algorithms (RFC 6376 §3.6.1 / §6.1.2) ──
-
 // keyRecordWithHashTag renders a valid DKIM key record for the given public PEM
 // and appends an h= tag listing algs (e.g. "sha1" or "sha1:sha256"), yielding
 // the TXT value a resolver publishes for a key that restricts which hash
@@ -837,43 +756,6 @@ func TestVerify_KeyHashAlgorithmAllowedVerifies(t *testing.T) {
 		})
 	}
 }
-
-// TestKeyRecordAllowsHash pins the h= list-matching helper directly: the
-// signature's hash name must appear in the key record's colon-separated h= list,
-// matched case-sensitively (RFC 6376 §3.2) with surrounding folding whitespace
-// ignored, and an unrecognized entry must neither match nor suppress a later
-// valid one.
-//
-// checklist: DKIM-TAG-03 DKIM-KEY-02
-func TestKeyRecordAllowsHash(t *testing.T) {
-	allow := []struct{ hTag, alg string }{
-		{"sha256", "sha256"},
-		{"sha1:sha256", "sha256"},
-		{"sha256:sha1", "sha1"},
-		{" sha1 : sha256 ", "sha256"},
-		{"x-unknown:sha256", "sha256"},
-	}
-	for _, c := range allow {
-		if !keyRecordAllowsHash(c.hTag, c.alg) {
-			t.Errorf("keyRecordAllowsHash(%q, %q) = false, want true", c.hTag, c.alg)
-		}
-	}
-	deny := []struct{ hTag, alg string }{
-		{"sha1", "sha256"},
-		{"sha256", "sha1"},
-		{"sha1:sha512", "sha256"},
-		{"x-unknown", "sha256"},
-		{"", "sha256"},
-		{"SHA256", "sha256"},
-	}
-	for _, c := range deny {
-		if keyRecordAllowsHash(c.hTag, c.alg) {
-			t.Errorf("keyRecordAllowsHash(%q, %q) = true, want false", c.hTag, c.alg)
-		}
-	}
-}
-
-// ── Key-record version v= (RFC 6376 §3.6.1 / §6.1.2) ────────────────────
 
 // TestVerify_KeyRecordWrongVersionRejected is the red-green anchor for issue
 // #11: the message is signed correctly, but the key record published in DNS
@@ -963,31 +845,6 @@ func TestVerify_KeyRecordVersionAcceptedVerifies(t *testing.T) {
 		})
 	}
 }
-
-// TestFirstTagName pins the ordering helper directly: it returns the name of the
-// first tag in a DKIM tag-list record, ignoring the ABNF's optional leading
-// folding whitespace and empty leading segments, and "" when there is no tag.
-//
-// checklist: DKIM-KEY-01
-func TestFirstTagName(t *testing.T) {
-	cases := []struct{ rec, want string }{
-		{"v=DKIM1; k=rsa; p=AAA", "v"},
-		{"k=rsa; v=DKIM1; p=AAA", "k"},
-		{"  v=DKIM1; p=AAA", "v"},
-		{"; v=DKIM1", "v"},
-		{"p=AAA", "p"},
-		{"", ""},
-		{"   ", ""},
-		{"p; v=DKIM1", ""},
-	}
-	for _, c := range cases {
-		if got := firstTagName(c.rec); got != c.want {
-			t.Errorf("firstTagName(%q) = %q, want %q", c.rec, got, c.want)
-		}
-	}
-}
-
-// ── Signature expiration x= / timestamp t= (RFC 6376 §3.5 / §6.1.1) ──────
 
 // signWithTiming signs a message (relaxed/relaxed) exactly like signTestMessage
 // but splices timing tags (timing, e.g. "t=1000000000; x=1000000001; ") into
@@ -1171,24 +1028,6 @@ func TestVerify_InvalidExpirationTagRejected(t *testing.T) {
 	}
 }
 
-// TestParseTimeTag pins the RFC 6376 §3.5 timestamp ABNF (1*12DIGIT) directly:
-// digits only, non-empty, at most 12 digits; anything else is an error.
-//
-// checklist: DKIM-SIG-10 DKIM-SIG-13
-func TestParseTimeTag(t *testing.T) {
-	good := map[string]int64{"0": 0, "1000000000": 1000000000, "999999999999": 999999999999}
-	for in, want := range good {
-		if got, err := parseTimeTag(in); err != nil || got != want {
-			t.Errorf("parseTimeTag(%q)=%d,%v want %d,nil", in, got, err, want)
-		}
-	}
-	for _, bad := range []string{"", " ", "-1", "+1", "1e6", "12.5", "abc", "1000000000000"} {
-		if _, err := parseTimeTag(bad); err == nil {
-			t.Errorf("parseTimeTag(%q) should error", bad)
-		}
-	}
-}
-
 // publicPEM renders a private key's public half exactly as GenerateKey does
 // (PKIX SubjectPublicKeyInfo), which is what RecordValue consumes.
 func publicPEM(t *testing.T, priv *rsa.PrivateKey) string {
@@ -1199,14 +1038,6 @@ func publicPEM(t *testing.T, priv *rsa.PrivateKey) string {
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
 }
-
-// ── Unpadded base64 tolerance (RFC 6376 §2.10 / §3.5) — issue #10 ─────────
-//
-// RFC 6376's base64string ABNF makes the trailing "=" padding OPTIONAL, so a
-// conformant signer or key record may emit unpadded base64. verify.go must
-// decode bh=, b= and key p= tolerantly and MUST NOT reject an otherwise-valid
-// signature with a spurious "invalid base64" PERMFAIL merely because the
-// padding is absent.
 
 // signTestMessageUnpadded is signTestMessage (relaxed/relaxed) with the base64
 // padding stripped from the two signature-carried base64 values: bh= (which is
@@ -1335,72 +1166,6 @@ func TestVerify_UnpaddedBase64Accepted(t *testing.T) {
 	})
 }
 
-// TestDecodeBase64Tag exercises the tolerant decoder that all three verify.go
-// base64 sites (bh=, b=, key p=) share, over the shapes RFC 6376 §2.10 / §3.5
-// permit: padded and unpadded (length ≡ 2 and ≡ 3 mod 4), values carrying folding
-// whitespace, and genuinely invalid input that must still be rejected.
-//
-// checklist: DKIM-TAG-07 DKIM-SIG-04
-func TestDecodeBase64Tag(t *testing.T) {
-	// Inputs chosen so the canonical encoding needs padding: 4 bytes ≡ 1 (mod 3)
-	// → 2 pad chars (encoded length ≡ 3 mod 4); 5 bytes ≡ 2 (mod 3) → 1 pad char
-	// (encoded length ≡ 2 mod 4). 3 bytes needs none (length ≡ 0 mod 4).
-	for _, tc := range []struct {
-		name string
-		raw  []byte
-	}{
-		{"one pad char (len%4==2)", []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x01}},
-		{"two pad chars (len%4==3)", []byte{0xDE, 0xAD, 0xBE, 0xEF}},
-		{"no pad needed (len%4==0)", []byte{0xDE, 0xAD, 0xBE}},
-		{"empty", []byte{}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			padded := base64.StdEncoding.EncodeToString(tc.raw)
-			unpadded := strings.TrimRight(padded, "=")
-
-			for label, in := range map[string]string{
-				"padded":              padded,
-				"unpadded":            unpadded,
-				"unpadded + FWS fold": insertFWS(unpadded),
-				"padded + FWS fold":   insertFWS(padded),
-			} {
-				got, err := decodeBase64Tag(in)
-				if err != nil {
-					t.Fatalf("%s: unexpected error: %v", label, err)
-				}
-				if !bytesEqual(got, tc.raw) {
-					t.Fatalf("%s: decoded %x, want %x", label, got, tc.raw)
-				}
-			}
-		})
-	}
-
-	// Genuinely invalid base64 must still be rejected (not silently accepted).
-	for _, bad := range []string{"!!!!", "AB=C", "ABCDE"} { // last is length ≡ 1 mod 4
-		if _, err := decodeBase64Tag(bad); err == nil {
-			t.Errorf("decodeBase64Tag(%q) accepted invalid input, want error", bad)
-		}
-	}
-}
-
-// insertFWS splices a CRLF+space fold into the middle of a base64 string to model
-// a value folded across lines (RFC 6376 permits FWS within base64string).
-func insertFWS(s string) string {
-	if len(s) < 2 {
-		return s
-	}
-	mid := len(s) / 2
-	return s[:mid] + "\r\n " + s[mid:]
-}
-
-// ── Signature v= version tag is REQUIRED and MUST be 1 (RFC 6376 §3.5) — issue #14 ──
-//
-// RFC 6376 §3.5 lists v= as the first, REQUIRED tag of a DKIM-Signature and
-// specifies its value MUST be "1". A signature lacking v= is malformed and must
-// PERMFAIL — it must NOT be accepted merely because a wrong-version guard only
-// fired when v= was present. (This is the signature header's v=, distinct from
-// the key record's v=DKIM1, which is issue #11.)
-
 // signWithVersionTag signs a message (relaxed/relaxed) exactly like
 // signTestMessage but lets the caller control the leading v= tag of the
 // DKIM-Signature. versionTag is spliced verbatim at the front of the tag-list
@@ -1519,22 +1284,6 @@ func TestVerify_VersionOneVerifies(t *testing.T) {
 	}
 }
 
-// ── Bare (policy-free) verification for ARC (RFC 8617 §4.1.2) — issue #33 ──
-//
-// VerifySignatureBare is the policy-free cryptographic primitive: it selects the
-// h= headers, canonicalizes per c=, hashes per a=/l=, and RSA-verifies b= against
-// the d=/s= key — and NOTHING else. It applies none of the RFC 6376
-// DKIM-Signature POLICY that VerifySignature layers on top (v= required, From
-// signed, i= alignment, timing, key t=s/s= flags). It exists so a layered scheme
-// can verify a signature that is structurally a DKIM-Signature but governed by
-// its own policy: an ARC-Message-Signature is versionless by design (RFC 8617
-// §4.1.2) and carries no author-alignment semantics, so an ARC verifier checks
-// the AMS mechanism here and then enforces RFC 8617 itself.
-//
-// These tests pin the SEAM: the same signature that VerifySignatureBare accepts
-// on mechanism, VerifySignature rejects on the DKIM policy it violates — and that
-// VerifySignature's strictness is unchanged is covered by every other test here.
-
 // splitToSig splits a raw message and returns the DKIM-Signature header together
 // with the full header block and body — the exact inputs the per-signature
 // primitives consume — so a test can drive VerifySignature / VerifySignatureBare
@@ -1631,8 +1380,6 @@ func TestVerifySignatureBare_IgnoresKeyPolicyFlags(t *testing.T) {
 		t.Errorf("VerifySignature must enforce key s= service flag; want permerror, got %s (%s)", res.Result, res.Reason)
 	}
 }
-
-// ── Key-record t=s no-subdomain flag (RFC 6376 §3.6.1) ───────────────────
 
 // keyRecordWithFlags renders a valid DKIM key record for the given public PEM
 // and appends a t= tag carrying flags (e.g. "s" or "y:s"), yielding the TXT
@@ -1739,29 +1486,6 @@ func mustRecord(t *testing.T, pubPEM string) string {
 	return rec
 }
 
-// TestParseKeyFlags pins the flag-list parser directly: the "s" (no-subdomain)
-// flag is recognized alone and within a colon-separated list, case-sensitively
-// (RFC 6376 §3.2), with surrounding folding whitespace ignored; unrecognized flags (e.g. "y") neither
-// set it nor suppress a sibling "s".
-//
-// checklist: DKIM-TAG-03 DKIM-KEY-06 DKIM-KEY-08
-func TestParseKeyFlags(t *testing.T) {
-	set := []string{"s", "y:s", "s:y", " y : s ", "s:x-future"}
-	for _, tt := range set {
-		if !parseKeyFlags(tt).NoSubdomain {
-			t.Errorf("parseKeyFlags(%q).NoSubdomain = false, want true", tt)
-		}
-	}
-	unset := []string{"", "y", "y:x-future", "subdomain", "S"}
-	for _, tt := range unset {
-		if parseKeyFlags(tt).NoSubdomain {
-			t.Errorf("parseKeyFlags(%q).NoSubdomain = true, want false", tt)
-		}
-	}
-}
-
-// ── Key-record s= service type (RFC 6376 §3.6.1) ─────────────────────────
-
 // keyRecordWithService renders a valid DKIM key record for the given public PEM
 // and appends an s= tag carrying svcs (e.g. "email", "tlsa", or "email:tlsa"),
 // yielding the TXT value a resolver publishes for a key whose service-type list
@@ -1833,42 +1557,6 @@ func TestVerify_KeyServiceTypeEmailVerifies(t *testing.T) {
 	rec := mustRecord(t, pubPEM)
 	if r := Verify(context.Background(), raw, keyRecordResolver("sel", "example.test", rec)); len(r) != 1 || r[0].Result != ResultPass {
 		t.Fatalf("absent s= (default *) should pass, got %+v", r)
-	}
-}
-
-// TestKeyRecordAllowsService pins the s= list-matching helper directly: email is
-// permitted when the colon-separated list contains "email" or the wildcard "*",
-// matched case-sensitively (RFC 6376 §3.2) with surrounding folding whitespace ignored, and an
-// unrecognized service type must neither match nor suppress a sibling "email"/"*".
-// An empty list permits nothing.
-//
-// checklist: DKIM-TAG-03 DKIM-KEY-05
-func TestKeyRecordAllowsService(t *testing.T) {
-	allow := []struct{ sTag string }{
-		{"email"},
-		{"*"},
-		{"email:tlsa"},
-		{"tlsa:email"},
-		{" tlsa : email "},
-		{"*:tlsa"},
-		{"x-unknown:email"},
-	}
-	for _, c := range allow {
-		if !keyRecordAllowsService(c.sTag) {
-			t.Errorf("keyRecordAllowsService(%q) = false, want true", c.sTag)
-		}
-	}
-	deny := []struct{ sTag string }{
-		{"tlsa"},
-		{"notemail"},
-		{"tlsa:x-unknown"},
-		{""},
-		{"EMAIL"},
-	}
-	for _, c := range deny {
-		if keyRecordAllowsService(c.sTag) {
-			t.Errorf("keyRecordAllowsService(%q) = true, want false", c.sTag)
-		}
 	}
 }
 

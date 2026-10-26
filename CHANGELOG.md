@@ -6,6 +6,16 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-26
+
+### Changed
+
+- Split grammar, codecs, signature folding and DNS key-record helpers into
+  focused `pkg/dkim/internal` packages, with their white-box tests beside them.
+- The public `pkg/dkim` API and signing/verification behavior are unchanged.
+- Pin CI's shared RFC proof to the revision that measures coverage across
+  packages with `-coverpkg`, so integration tests cover internal helpers.
+
 ## [0.5.0] - 2026-10-26
 
 ### Changed (breaking)
