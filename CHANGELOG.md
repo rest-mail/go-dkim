@@ -6,6 +6,30 @@ module tags of the form `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-03
+
+### Added
+
+- `VerifyWithOptions` and `VerifySignatureWithOptions` take a new
+  `VerifyOptions`; `Verify` and `VerifySignature` use its zero value.
+- `VerifyOptions.MaxSignatures` caps how many DKIM-Signature fields one
+  message gets checked, from the top down (RFC 6376 §6.1, §8.4), so a sender
+  cannot make the receiver do hundreds of DNS lookups and hashes for one
+  delivery. Each signature past the cap is reported as `neutral` with a reason
+  saying it was not checked. Zero means `DefaultMaxSignatures` (5; OpenDKIM
+  defaults to 3, rspamd to 5); a negative value removes the cap (#48).
+- `VerifyOptions.RequiredHeaders` names header fields every signature's `h=`
+  must list besides From (RFC 6376 §6.1.1). A signature that leaves one out is
+  a `permerror` naming the field. Empty, the default, requires From only. The
+  bare primitives do not apply it (#47).
+- Checklist row DKIM-VER-24 for the signature limit; DKIM-VER-08 is now
+  mapped. The checklist maps 112 of 135 rows.
+
+### Changed
+
+- `Verify` checks at most 5 signatures per message; it used to check every
+  one. Messages with 5 or fewer verify as before.
+
 ## [0.5.1] - 2026-10-26
 
 ### Changed
