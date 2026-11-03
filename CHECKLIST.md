@@ -47,8 +47,8 @@ claim that arbitrary input has been proved conformant to every imported ABNF.
 | RFC 8616 §5 | Added EAI-01–05: U-labels and UTF-8 in d=, s= and i=, A-label key lookup, header-form hash; the signer recommendation is n/a. |
 | RFC 8463 §§1–9, Appendix A | All algorithm/key syntax/implementation clauses already in ALG-10–14 and KEY-17; published dual-signature vector remains TestRFC8463Example. |
 
-The configurable required-signed-header list (VER-08) remains an owner decision;
-this pass adds no Verify option. Timestamp/expiry defaults and publisher/host
+The configurable required-signed-header list (VER-08) and the signature limit
+(VER-24) were added later as Verify options. Timestamp/expiry defaults and publisher/host
 duties below remain explicit limitations, not implied implementation claims.
 
 ## Tag lists (§3.2, §2.10)
@@ -190,7 +190,7 @@ duties below remain explicit limitations, not implied implementation claims.
 | DKIM-VER-05 | 6.1 | SHOULD NOT | Treat a message with only bad signatures differently from an unsigned one. | n/a: how a result is acted on is the receiver's policy. |
 | DKIM-VER-06 | 6.1.1, 8.9 | MUST | Validate the signature field meticulously; any inconsistency makes it ignored (PERMFAIL). | `TestRequiredTags`, `TestInvalidTagValues`, `FuzzSignatureHeader` |
 | DKIM-VER-07 | 5.4, 6.1.1 | MUST | A signature whose h= does not cover From is PERMFAIL (From field not signed). | `TestVerify_FromNotSignedRejected`, `TestVerify_FromSignedVerifies`, `TestHeaderListCoversFrom` |
-| DKIM-VER-08 | 6.1.1 | SHOULD | Make configurable the list of fields a signature must cover. | n/a: not supported; the library requires From only, as the RFC does. |
+| DKIM-VER-08 | 6.1.1 | SHOULD | Make configurable the list of fields a signature must cover. | `TestVerifyRequiredHeaders` |
 | DKIM-VER-09 | 6.1.3 | MUST | Match h= names against field names case-insensitively. | `TestHeaderNamesCaseInsensitive` |
 | DKIM-VER-10 | 6.1.3 | SHOULD | A body hash that does not match is PERMFAIL (body hash did not verify), reported as fail. | `TestVerify_BodyTamperFails` |
 | DKIM-VER-11 | 6.1.3 | SHOULD | A signature that does not validate is PERMFAIL (signature did not verify), reported as fail. | `TestVerify_HeaderTamperFails`, `TestVerify_WrongKeyFails`, `TestSign_TamperFails` |
@@ -223,6 +223,7 @@ duties below remain explicit limitations, not implied implementation claims.
 | DKIM-VER-21 | 6.1.1 | MUST | In the absence of i=, behave as though it were @ followed by d=, including when the key requires t=s. | `TestAbsentAUIDUsesSigningDomain` |
 | DKIM-VER-22 | 6.1.1 | SHOULD | If rejecting SDIDs as unacceptable signing entities, make that domain list configurable. | n/a: this optional domain-rejection mode is not implemented; Verify has no built-in unacceptable-domain list. Caller policy can filter reported Domain values. |
 | DKIM-VER-23 | 6.3 | SHOULD | When a verified SDID differs from From, make the actual SDID clear to the reader. | n/a: user presentation is the consuming mail system's responsibility; VerifyResult.Domain exposes the SDID independently of From (VER-02). |
+| DKIM-VER-24 | 6.1, 8.4 | MAY | Limit the number of signatures attempted, to bound the DNS lookups and hashing a sender can cause; report the ones not checked. | `TestVerifyLimitsSignatures`, `TestVerifyAtSignatureLimit` |
 | DKIM-IANA-01 | 7 | MUST | Registry submissions include the registered name, defining document and active or historic status. | n/a: the library makes no IANA registrations; it implements the existing algorithm, tag and key registries. |
 
 ## Internationalized mail (RFC 8616 §5)

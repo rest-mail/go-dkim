@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/rest-mail/go-dkim/actions/workflows/ci.yml/badge.svg)](https://github.com/rest-mail/go-dkim/actions/workflows/ci.yml)
 [![Coverage gate: ≥95%](https://img.shields.io/badge/coverage%20gate-%E2%89%A595%25-brightgreen)](COVERAGE.md)
-[![Checklist: 110/134 mapped](https://img.shields.io/badge/checklist-110%2F134%20mapped-blue)](CHECKLIST.md)
+[![Checklist: 112/135 mapped](https://img.shields.io/badge/checklist-112%2F135%20mapped-blue)](CHECKLIST.md)
 [![Go Reference](https://pkg.go.dev/badge/github.com/rest-mail/go-dkim.svg)](https://pkg.go.dev/github.com/rest-mail/go-dkim/pkg/dkim)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rest-mail/go-dkim)](https://goreportcard.com/report/github.com/rest-mail/go-dkim)
 
@@ -46,7 +46,7 @@ The module declares go 1.25.
 
 | Import path | What it holds |
 |-------------|---------------|
-| `github.com/rest-mail/go-dkim/pkg/dkim` | Signing and verifying: `Sign`, `SignOptions`, `DefaultSignedHeaders`, `DefaultOversignedHeaders`, `ParsePrivateKey`, `Verify`, `VerifyResult`, the `Result*` values and `TXTResolver`; the single-signature and canonicalization primitives (`Header`, `SplitMessage`, `CanonicalizeHeader`, `CanonicalizeBody`, `BuildSignedHeaders`, `VerifySignature`, `VerifySignatureBare`, `VerifySignatureBareTags`, `FetchKey`, `KeyFlags`, `ParseTagList`, `ParseTagListStrict`, `RemoveBValue`, `StripWSP`, `HashBytes`); and the key helpers `GenerateKey`, `RecordName`, `RecordValue`, `RecordFragment` and `DefaultSelector`. |
+| `github.com/rest-mail/go-dkim/pkg/dkim` | Signing and verifying: `Sign`, `SignOptions`, `DefaultSignedHeaders`, `DefaultOversignedHeaders`, `ParsePrivateKey`, `Verify`, `VerifyWithOptions`, `VerifyOptions`, `DefaultMaxSignatures`, `VerifyResult`, the `Result*` values and `TXTResolver`; the single-signature and canonicalization primitives (`Header`, `SplitMessage`, `CanonicalizeHeader`, `CanonicalizeBody`, `BuildSignedHeaders`, `VerifySignature`, `VerifySignatureWithOptions`, `VerifySignatureBare`, `VerifySignatureBareTags`, `FetchKey`, `KeyFlags`, `ParseTagList`, `ParseTagListStrict`, `RemoveBValue`, `StripWSP`, `HashBytes`); and the key helpers `GenerateKey`, `RecordName`, `RecordValue`, `RecordFragment` and `DefaultSelector`. |
 | `pkg/dkim/internal/grammar` | Tag-list and numeric grammar, field/DNS names and identity alignment. Internal: not importable by callers. |
 | `pkg/dkim/internal/codec` | Folding-whitespace and base64 codecs. Internal: not importable by callers. |
 | `pkg/dkim/internal/folding` | DKIM signature value folding. Internal: not importable by callers. |
@@ -195,6 +195,26 @@ PERMFAILs for a body hash or signature that does not verify are reported as
 `fail`; every other PERMFAIL (a malformed signature, a missing or unusable key)
 as `permerror`; a DNS failure as `temperror`.
 
+`VerifyWithOptions` and `VerifySignatureWithOptions` take a `VerifyOptions`;
+its zero value is what `Verify` and `VerifySignature` use.
+
+- `MaxSignatures` caps how many signatures one message gets checked, from the
+  top down (RFC 6376 §6.1). Each check can cost a DNS lookup, two hashes and a
+  public-key operation, and the sender picks the count (§8.4). Zero means
+  `DefaultMaxSignatures`, which is 5; OpenDKIM's `MaximumSignaturesToVerify`
+  defaults to 3 and rspamd's `max_sigs` to 5. A negative value removes the
+  cap. Each signature past it is still reported, as `neutral` with a reason
+  saying it was not checked, and costs no lookup.
+- `RequiredHeaders` names fields every signature's `h=` must list besides
+  From, compared case-insensitively (§6.1.1). A signature that leaves one out
+  is a `permerror` naming the field. Empty, the default, requires From only.
+
+```go
+results := dkim.VerifyWithOptions(ctx, raw, nil, dkim.VerifyOptions{
+	RequiredHeaders: []string{"Subject", "Date"},
+})
+```
+
 A resolver returns one string per TXT record, with the record's
 character-strings joined without spaces, as `net.Resolver.LookupTXT` does. A
 name that does not exist is a `*net.DNSError` whose `IsNotFound` is true; any
@@ -262,8 +282,12 @@ The library:
 
 - Checks each signature on its own and reports it in header order; no result
   depends on the others or on their order.
-- Requires `v=1`, From among the signed fields, an `i=` aligned with `d=`, and
-  a signature that has not expired. An expired signature is a `permerror`,
+- Checks at most `DefaultMaxSignatures` (5) signatures per message unless the
+  host sets `VerifyOptions.MaxSignatures`, and reports the rest as `neutral`,
+  not checked.
+- Requires `v=1`, From (and any `VerifyOptions.RequiredHeaders`) among the
+  signed fields, an `i=` aligned with `d=`, and a signature that has not
+  expired. An expired signature is a `permerror`,
   which RFC 6376 §6.1.1 allows but does not require.
 - Treats an empty optional tag (`c=`, `i=`, `t=`, `x=`, `l=`, `q=`) as
   malformed; defaults apply only when a tag is absent. An `l=` larger than the
@@ -373,7 +397,7 @@ it.
 
 Some gaps are deliberate, and go-dkim will not fill them. Others are planned,
 each with an issue. The checklist records every one as an `n/a` row with its
-reason, except the signature limit, which has no row yet.
+reason.
 
 #### Not supported, by design
 
@@ -393,18 +417,11 @@ reason, except the signature limit, which has no row yet.
 | DKIM-quoted-printable | No encoder or decoder: `Sign` emits no `i=` or `z=`, and `Verify` does not decode `z=` copied headers or `n=` notes. |
 | Unacceptable signing domains | No built-in list of refused `d=` domains; the host filters `VerifyResult.Domain`. |
 
-#### Planned
-
-| Gap | Issue |
-|-----|-------|
-| `Verify` requires only From among the signed fields; a host cannot require more (RFC 6376 §6.1.1). | [#47](https://github.com/rest-mail/go-dkim/issues/47) |
-| `Verify` checks every DKIM-Signature in a message, however many there are (RFC 6376 §§6.1, 8.4). | [#48](https://github.com/rest-mail/go-dkim/issues/48) |
-
 ### Badges and coverage
 
 The badges at the top are checked in CI. `TestReadmeChecklistBadge` in
 `internal/checklist` checks the checklist badge: it counts mapped rows over all
-rows, and the 24 `n/a` rows are in the denominator, so the badge never claims
+rows, and the 23 `n/a` rows are in the denominator, so the badge never claims
 more than the tests prove. The workflow fixtures in
 [`.github/tests`](.github/tests) check the coverage badge. It shows the floor CI
 enforces, not a measured figure; each CI run prints the measured statement
@@ -438,6 +455,12 @@ the targets; regression inputs belong in each target package's `testdata/fuzz`.
 ## Changelog
 
 Recent releases; see [CHANGELOG.md](CHANGELOG.md) for the complete history.
+
+### v0.6.0 (2026-11-03)
+
+`VerifyOptions`: `Verify` checks at most 5 signatures per message by default,
+reporting the rest as not checked, and a host can require header fields
+besides From to be signed.
 
 ### v0.5.1 (2026-10-26)
 
@@ -489,10 +512,6 @@ has expired or malformed timing is refused. `ParseTagListStrict` is exported.
 ### v0.1.2 (2026-07-25)
 
 A non-digit `l=` is refused, fixing a remotely triggerable panic.
-
-### v0.1.1 (2026-07-23)
-
-The module path is `github.com/rest-mail/go-dkim`.
 
 ## Licence
 

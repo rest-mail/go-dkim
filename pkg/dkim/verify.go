@@ -31,9 +31,53 @@ var timeNow = time.Now
 // It returns one VerifyResult per DKIM-Signature header found, in header order.
 // An empty slice means the message carried no DKIM-Signature. A nil resolver
 // uses the system DNS resolver.
+//
+// Verify is VerifyWithOptions with the zero VerifyOptions: it checks at most
+// DefaultMaxSignatures signatures and requires only From to be signed.
 func Verify(ctx context.Context, rawMessage []byte, resolver TXTResolver) []VerifyResult {
+	return VerifyWithOptions(ctx, rawMessage, resolver, VerifyOptions{})
+}
+
+// DefaultMaxSignatures is how many DKIM-Signature fields Verify checks in one
+// message when VerifyOptions.MaxSignatures is zero. Each signature checked
+// can cost a DNS TXT lookup for its key record, a body hash, a header hash and
+// a public-key operation, and the sender chooses how many signatures a message
+// carries; RFC 6376 §6.1 lets a verifier limit the number it attempts, and
+// §8.4 names this resource exhaustion. Legitimate mail rarely carries more
+// than two or three (the author's domain, an ESP, a mailing list). OpenDKIM's
+// MaximumSignaturesToVerify defaults to 3 and rspamd's dkim max_sigs to 5;
+// go-dkim uses 5.
+const DefaultMaxSignatures = 5
+
+// VerifyOptions configures VerifyWithOptions and VerifySignatureWithOptions.
+// The zero value is the default Verify and VerifySignature use.
+type VerifyOptions struct {
+	// MaxSignatures caps how many DKIM-Signature fields VerifyWithOptions
+	// checks in one message (RFC 6376 §6.1). Signatures are taken from the top
+	// of the header block down, as OpenDKIM does. Each one past the cap is
+	// still reported, in header order, with ResultNeutral and a reason saying
+	// it was not checked; no DNS query or hash is spent on it. Zero means
+	// DefaultMaxSignatures; a negative value removes the cap.
+	// VerifySignatureWithOptions checks one signature and ignores it.
+	MaxSignatures int
+
+	// RequiredHeaders names header fields every signature's h= tag must list,
+	// besides From, which is always required (RFC 6376 §6.1.1). Names are
+	// compared case-insensitively; empty names are ignored. A signature whose
+	// h= lacks one is a permerror whose reason names the field, decided before
+	// any DNS query. Empty, the default, requires From only.
+	RequiredHeaders []string
+}
+
+// VerifyWithOptions is Verify with options: a cap on the signatures checked
+// and header fields every signature must cover. See VerifyOptions.
+func VerifyWithOptions(ctx context.Context, rawMessage []byte, resolver TXTResolver, opts VerifyOptions) []VerifyResult {
 	if resolver == nil {
 		resolver = net.DefaultResolver.LookupTXT
+	}
+	limit := opts.MaxSignatures
+	if limit == 0 {
+		limit = DefaultMaxSignatures
 	}
 	headers, body := SplitMessage(rawMessage)
 
@@ -42,9 +86,25 @@ func Verify(ctx context.Context, rawMessage []byte, resolver TXTResolver) []Veri
 		if !strings.EqualFold(h.Name, "DKIM-Signature") {
 			continue
 		}
-		results = append(results, VerifySignature(ctx, h, headers, body, resolver))
+		if limit > 0 && len(results) >= limit {
+			results = append(results, notChecked(h, limit))
+			continue
+		}
+		results = append(results, VerifySignatureWithOptions(ctx, h, headers, body, resolver, opts))
 	}
 	return results
+}
+
+// notChecked reports a signature past the MaxSignatures cap. It reads d= and
+// s= for the report only; nothing about the signature is verified.
+func notChecked(sig Header, limit int) VerifyResult {
+	tags := ParseTagList(sig.Value)
+	return VerifyResult{
+		Domain:   tags["d"],
+		Selector: tags["s"],
+		Result:   ResultNeutral,
+		Reason:   fmt.Sprintf("signature not checked: at most %d DKIM-Signature fields are verified per message (RFC 6376 §6.1)", limit),
+	}
 }
 
 // TXTResolver looks up DNS TXT records for a name. It matches the signature of
@@ -102,6 +162,14 @@ type Header struct {
 // same canonicalization and crypto path with none of the DKIM policy, and apply
 // the scheme's own policy on top.
 func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body string, resolver TXTResolver) VerifyResult {
+	return VerifySignatureWithOptions(ctx, sig, allHeaders, body, resolver, VerifyOptions{})
+}
+
+// VerifySignatureWithOptions is VerifySignature with options: it also requires
+// h= to list every field in opts.RequiredHeaders (RFC 6376 §6.1.1).
+// opts.MaxSignatures does not apply to a single signature. The options are
+// DKIM policy, so VerifySignatureBare and VerifySignatureBareTags take none.
+func VerifySignatureWithOptions(ctx context.Context, sig Header, allHeaders []Header, body string, resolver TXTResolver, opts VerifyOptions) VerifyResult {
 	// Parse strictly: a DKIM-Signature whose tag-list repeats a tag name (or
 	// carries a malformed segment) is invalid per RFC 6376 §3.2 and must PERMFAIL
 	// rather than resolve to an arbitrary value — otherwise verifiers that pick a
@@ -139,6 +207,14 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	// signature and return PERMFAIL (From field not signed).
 	if !grammar.HeaderListCoversFrom(tags["h"]) {
 		return permfail("From field not signed (h= does not cover from)")
+	}
+
+	// Host-required fields (RFC 6376 §6.1.1): a verifier SHOULD let its
+	// operator name fields a signature must cover, and treat a signature that
+	// leaves one out as unacceptable. Like From, a missing one PERMFAILs
+	// before any DNS lookup.
+	if missing := missingRequired(tags["h"], opts.RequiredHeaders); missing != "" {
+		return permfail(fmt.Sprintf("required header field %s not signed (h= does not cover %s)", missing, missing))
 	}
 
 	// Identity alignment (RFC 6376 §6.1.1): when an Agent or User Identifier
@@ -232,6 +308,26 @@ func VerifySignature(ctx context.Context, sig Header, allHeaders []Header, body 
 	}
 
 	return result
+}
+
+// missingRequired returns the first name in required that the h= list hTag does
+// not name, lower-cased, or "" when h= names them all. Names compare
+// case-insensitively (RFC 6376 §6.1.3) with surrounding whitespace trimmed.
+func missingRequired(hTag string, required []string) string {
+	if len(required) == 0 {
+		return ""
+	}
+	signed := map[string]bool{}
+	for _, name := range strings.Split(hTag, ":") {
+		signed[strings.ToLower(grammar.TrimFWS(name))] = true
+	}
+	for _, name := range required {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name != "" && !signed[name] {
+			return name
+		}
+	}
+	return ""
 }
 
 // VerifySignatureBare verifies ONLY the cryptographic mechanism of a DKIM-shaped
